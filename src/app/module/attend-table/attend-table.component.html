@@ -1,0 +1,23 @@
+<div class="container">
+  <button class="btn btn-success" (click)="downloadAttendanceList()">Download</button>
+  <h1 class="text-center">Danh sách điểm danh</h1>
+    <table class="table table-responsive table-hover table-bordered">
+        <thead class="text-center">
+          <tr>
+            <th scope="col">#</th>
+            <th scope="col">MSSV</th>
+            <th scope="col">Họ và tên</th>
+            <th scope="col">Điểm danh</th>
+          </tr>
+        </thead>
+        <tbody class="text-center">
+          <tr *ngFor = "let item of userList; let i = index">
+            <td>{{i + 1}}</td>
+            <td>{{item.MSSV}}</td>
+            <td>{{item.Name}}</td>
+            <td><span *ngIf="item.attendance">{{ item.attendance }}</span></td>
+          </tr>
+        </tbody>
+      </table>
+  <button class="btn btn-success position-absolute top-0 left-0" (click)="downloadAttendanceList()">Download Attendance List</button>
+</div>
