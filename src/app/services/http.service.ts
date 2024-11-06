@@ -7,13 +7,16 @@ import { Observable } from 'rxjs';
 })
 export class HttpService {
 
-  private apiUrl = 'http://localhost:5000/google-sheets/mssv'; // Thay thế bằng URL API của bạn
+  private apiUrl = 'http://172.20.121.208:5000/google-sheets'; // Thay thế bằng URL API của bạn
 
   constructor(private http: HttpClient) { }
 
-  getData(): Observable<any> {
+  async getData(): Promise<Observable<any>> {
     console.log('Getting data from API');
-    return this.http.get(`${this.apiUrl}`);
+    return this.http.get(`${this.apiUrl}/mssv`);
+  }
+  async attendData(): Promise<Observable<any>> {
+    return this.http.get(`${this.apiUrl}/attendance-list`);
   }
 
 }

@@ -2,19 +2,23 @@ import { NgModule } from "@angular/core";
 import { AttendTableComponent } from "./attend-table/attend-table.component";
 import { CommonModule } from "@angular/common";
 import { RouterModule } from "@angular/router";
-import { AttendRoutingModule } from "./attend-routing.module";
+import {FormsModule} from "@angular/forms";
+import {LoginComponent} from "./login/login.component";
+import {AttendRoutingModule} from "./attend-routing.module";
 
 @NgModule({
   declarations: [
-    AttendTableComponent
+    AttendTableComponent,
+    LoginComponent
   ],
   imports: [
     AttendRoutingModule,
     CommonModule,
-    RouterModule
+    RouterModule,
+    FormsModule,
   ],
   providers: [
-   
+
   ]
 })
 export class AttendModule { }
