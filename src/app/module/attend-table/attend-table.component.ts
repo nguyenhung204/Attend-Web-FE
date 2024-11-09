@@ -115,6 +115,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       console.error('Error generating CSV content');
     }
   }
+
   interpolationSearch(mssv: string): any {
     let left = 0;
     let right = this.userList.length - 1;
@@ -157,6 +158,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       return matchesSearchTerm;
     });
   }
+
   removeDiacritics(str: string): string {
     return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }

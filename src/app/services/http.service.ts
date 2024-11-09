@@ -7,7 +7,7 @@ import { Observable } from 'rxjs';
 })
 export class HttpService {
 
-  private apiUrl = 'http://172.20.121.208:5000/google-sheets'; // Thay thế bằng URL API của bạn
+  private apiUrl = 'http://172.16.10.164:5000/google-sheets'; // Thay thế bằng URL API của bạn
 
   constructor(private http: HttpClient) { }
 
