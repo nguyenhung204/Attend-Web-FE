@@ -7,8 +7,8 @@ import { Router } from '@angular/router';
   styleUrls: ['./login.component.scss']
 })
 export class LoginComponent {
-  username: string = '';
-  password: string = '';
+  username: string = 'admin';
+  password: string = 'password';
 
   constructor(private router: Router) {}
 
@@ -16,7 +16,7 @@ export class LoginComponent {
 
     if (this.username === 'admin' && this.password === 'password') {
       localStorage.setItem('isAuthenticated', 'true');
-      this.router.navigate(['/attends']);
+      this.router.navigate(['attends']);
     } else {
       alert('Invalid credentials');
     }

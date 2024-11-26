@@ -2,8 +2,7 @@ import { Component, OnInit, OnDestroy } from '@angular/core';
 import { HttpService } from '../../services/http.service';
 import { WebSocketService } from '../../services/websocket.service';
 import {saveAs} from "file-saver";
-import {Observable} from "rxjs";
-
+import { Observable } from 'rxjs';
 
 @Component({
   selector: 'app-attend-table',
@@ -15,6 +14,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   attendanceList: any;
   filteredUserList: any[] = [];
   searchTerm: string = '';
+  isLoading: boolean = true;
 
   constructor(
     public httpService: HttpService,
@@ -27,9 +27,11 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         console.log('Data loaded');
         this.syncAttendanceList();
         this.loadAttendanceFromLocalStorage();
+        this.isLoading = false;
       });
     });
   }
+ 
 
   ngOnInit() {
     this.webSocketService.onAttendanceMarked((mssvList: string[]) => {
@@ -39,21 +41,21 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       }
       this.markMultipleAttendances(mssvList);
       this.saveAttendanceToLocalStorage();
-
     });
   }
+
+
   ngOnDestroy() {
     console.log('AttendTableComponent destroyed');
-    // Đóng kết nối WebSocket khi component bị hủy
     this.webSocketService.disconnect();
   }
 
   markAttendance(mssv: string): string | null {
-    const student = this.interpolationSearch(mssv); // Use binary search
+    const student = this.interpolationSearch(mssv); 
     if (student) {
-      console.log('Found:', student);
+      // console.log('Found:', student);
       if (student.attendance) {
-        console.log('Already marked:', mssv);
+        // console.log('Already marked:', mssv);
         return mssv; // Return MSSV if already marked
       }
       student.attendance = new Date().toLocaleString();
@@ -61,7 +63,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       return null; // Return null if marking is successful
     } else {
       console.log('Not found:', mssv);
-      return null; // Return null if student not found
+      return null; 
     }
   }
 
@@ -162,7 +164,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   removeDiacritics(str: string): string {
     return str.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   }
-
+  
   async syncAttendanceList() {
     try {
       const observable = await this.httpService.attendData();
@@ -188,4 +190,6 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       console.error('Error fetching attendance data:', error);
     }
   }
+
+  
 }

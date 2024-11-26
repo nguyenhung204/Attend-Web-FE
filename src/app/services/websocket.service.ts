@@ -6,10 +6,9 @@ import { io, Socket } from 'socket.io-client';
 })
 export class WebSocketService {
   private socket: Socket;
-  private attendanceData: any[] = [];
 
   constructor() {
-    this.socket = io('ws://172.16.10.164:4500/', {
+    this.socket = io('https://www.bancongnghe.click/', {
       transports: ['websocket']
     });
 
