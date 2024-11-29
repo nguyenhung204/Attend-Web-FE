@@ -58,7 +58,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         // console.log('Already marked:', mssv);
         return mssv; // Return MSSV if already marked
       }
-      student.attendance = new Date().toLocaleString();
+      student.attendance = new Date().toLocaleDateString();
       console.log('Updated:', mssv);
       return null; // Return null if marking is successful
     } else {

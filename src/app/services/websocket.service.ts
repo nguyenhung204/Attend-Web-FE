@@ -8,7 +8,7 @@ export class WebSocketService {
   private socket: Socket;
 
   constructor() {
-    this.socket = io('https://www.bancongnghe.click/', {
+    this.socket = io('https://bancongnghe.click', {
       transports: ['websocket']
     });
 

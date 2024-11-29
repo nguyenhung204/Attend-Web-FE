@@ -23,6 +23,7 @@
           <th scope="col">#</th>
           <th scope="col">MSSV</th>
           <th scope="col">Họ và tên</th>
+          <th scope="col">Ghế</th>
           <th scope="col">Điểm danh</th>
         </tr>
       </thead>
@@ -31,6 +32,7 @@
           <td>{{i + 1}}</td>
           <td>{{item.MSSV}}</td>
           <td>{{item.Name}}</td>
+          <td>{{item.Position}}</td>
           <td><span *ngIf="item.attendance">{{ item.attendance }}</span></td>
         </tr>
       </tbody>
