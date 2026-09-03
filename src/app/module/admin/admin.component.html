@@ -1,0 +1,37 @@
+<main class="admin-page">
+  <header class="topbar">
+    <a class="brand" routerLink="/" aria-label="Attendance - về trang quét"><span class="brand-mark">A</span><span><strong>ATTEND</strong><small>CHECK-IN CONSOLE</small></span></a>
+    <nav aria-label="Điều hướng chính"><a routerLink="/">Trang quét</a><span class="current-page">Quản trị</span></nav>
+  </header>
+  <section class="hero">
+    <div><p class="eyebrow"><span class="live-dot"></span> TRUNG TÂM ĐIỀU HÀNH</p><h1>Quản lý điểm danh<br><em>chủ động, tức thì.</em></h1><span>Theo dõi người tham dự, quản lý sự kiện và cập nhật dữ liệu theo thời gian thực.</span></div>
+    <button class="secondary-button" type="button" (click)="fetchDashboard()" [disabled]="!selectedEventId"><span aria-hidden="true">↻</span> Làm mới dữ liệu</button>
+  </section>
+  <section class="event-toolbar" *ngIf="events.length">
+    <div class="event-picker"><span class="field-label">SỰ KIỆN ĐANG XEM</span><select [(ngModel)]="selectedEventId" (change)="refreshDashboard()" aria-label="Chọn sự kiện"><option *ngFor="let event of events" [value]="event.eventId">{{ event.name }}</option></select></div>
+    <div class="event-window" *ngIf="dashboard"><span class="field-label">THỜI GIAN ĐIỂM DANH</span><strong>{{ dashboard.event.checkInStartAt | date:'HH:mm, dd/MM/yyyy' }} — {{ dashboard.event.checkInEndAt | date:'HH:mm, dd/MM/yyyy' }}</strong></div>
+    <span class="status" *ngIf="dashboard" [class.closed]="dashboard.event.status !== 'OPEN'">{{ dashboard.event.status }}</span>
+  </section>
+  <section class="overview" *ngIf="dashboard">
+    <div class="overview-heading"><div><p class="eyebrow">TỔNG QUAN SỰ KIỆN</p><h2>{{ dashboard.event.name }}</h2></div><div class="realtime"><span class="pulse"></span> Đồng bộ realtime</div></div>
+    <div class="stats">
+      <article class="stat-card"><div class="stat-icon" aria-hidden="true">◉</div><div><span>Đã đăng ký</span><strong>{{ dashboard.registeredCount | number }}</strong><small>Tổng số sinh viên</small></div></article>
+      <article class="stat-card"><div class="stat-icon" aria-hidden="true">✓</div><div><span>Đã điểm danh</span><strong>{{ dashboard.checkedInCount | number }}</strong><small>Đã xác nhận có mặt</small></div></article>
+      <article class="stat-card"><div class="stat-icon" aria-hidden="true">↗</div><div><span>Tỷ lệ tham gia</span><strong>{{ rate }}%</strong><small>{{ dashboard.registeredCount - dashboard.checkedInCount }} người chưa điểm danh</small></div></article>
+    </div>
+    <div class="progress-row"><div><strong>Tiến độ điểm danh</strong><span>{{ dashboard.checkedInCount }} / {{ dashboard.registeredCount }} sinh viên</span></div><div class="progress-track" aria-label="Tiến độ điểm danh"><span [style.width.%]="rate"></span></div><strong class="progress-rate">{{ rate }}%</strong></div>
+  </section>
+  <section class="workspace-grid">
+    <article class="panel"><div class="panel-heading"><div class="heading-icon violet" aria-hidden="true">+</div><div><p class="eyebrow">THIẾT LẬP</p><h2>Tạo sự kiện mới</h2></div></div><label>Tên sự kiện<input [(ngModel)]="create.name" maxlength="200" placeholder="Ví dụ: Sinh hoạt đầu năm K22"></label><div class="two-cols"><label>Bắt đầu<input type="datetime-local" [(ngModel)]="create.checkInStartAt"></label><label>Kết thúc<input type="datetime-local" [(ngModel)]="create.checkInEndAt"></label></div><button class="primary-button" type="button" (click)="createEvent()" [disabled]="isSaving || !create.name || !create.checkInStartAt || !create.checkInEndAt"><span aria-hidden="true">+</span> Tạo sự kiện</button></article>
+    <article class="panel"><div class="panel-heading"><div class="heading-icon blue" aria-hidden="true">↑</div><div><p class="eyebrow">DANH SÁCH THAM GIA</p><h2>Nhập từ Excel</h2></div></div><label class="dropzone" [class.has-file]="selectedFile"><input type="file" accept=".xls,.xlsx" (change)="setFile($event)"><span class="upload-icon" aria-hidden="true">⇧</span><strong>{{ selectedFile ? 'Đã chọn tệp' : 'Chọn hoặc kéo thả tệp Excel' }}</strong><small>{{ selectedFile?.name || 'Hỗ trợ định dạng .xls và .xlsx' }}</small></label><button class="primary-button" type="button" (click)="importStudents()" [disabled]="isSaving || !selectedFile || !selectedEventId"><span aria-hidden="true">↑</span> {{ isSaving ? 'Đang xử lý…' : 'Nhập danh sách' }}</button><p *ngIf="importResult" class="notice">Đã đọc <b>{{ importResult.rowsRead }}</b> dòng · hợp lệ <b>{{ importResult.accepted }}</b> · thêm <b>{{ importResult.registrationsCreated }}</b> lượt đăng ký.</p></article>
+  </section>
+  <section class="data-panel students-panel" *ngIf="dashboard">
+    <div class="table-heading"><div><p class="eyebrow">DANH SÁCH THAM GIA</p><h2>Sinh viên đăng ký</h2><small>{{ filteredRegistrations.length }} kết quả hiển thị</small></div><label class="search-box"><span aria-hidden="true">⌕</span><input [(ngModel)]="studentSearch" placeholder="Tìm MSSV hoặc họ tên" aria-label="Tìm sinh viên"></label></div>
+    <div class="table-wrap"><table><thead><tr><th>STT</th><th>Sinh viên</th><th>MSSV</th><th>Thời gian điểm danh</th><th>Trạng thái</th></tr></thead><tbody><tr *ngFor="let student of filteredRegistrations; let i = index"><td class="index">{{ i + 1 }}</td><td class="student-name"><span class="avatar">{{ student.fullName.charAt(0) }}</span>{{ student.fullName }}</td><td class="mssv">{{ student.mssv }}</td><td class="check-time">{{ getCheckedInAt(student.mssv) ? (getCheckedInAt(student.mssv) | date:'dd/MM/yyyy · HH:mm:ss') : '—' }}</td><td><span class="attendance-status" [class.checked-in]="hasCheckedIn(student.mssv)"><i></i>{{ hasCheckedIn(student.mssv) ? 'Đã điểm danh' : 'Chưa điểm danh' }}</span></td></tr><tr *ngIf="!filteredRegistrations.length"><td colspan="5" class="empty">Chưa có sinh viên nào khớp với tìm kiếm.</td></tr></tbody></table></div>
+  </section>
+  <section class="data-grid" *ngIf="dashboard">
+    <article class="data-panel compact-panel"><div class="table-heading"><div><p class="eyebrow">HOẠT ĐỘNG</p><h2>Điểm danh gần đây</h2></div><span class="count-badge">{{ dashboard.attendance.length }} bản ghi</span></div><div class="table-wrap"><table><thead><tr><th>MSSV</th><th>Phương thức</th><th>Thời gian</th></tr></thead><tbody><tr *ngFor="let item of dashboard.attendance"><td class="mssv">{{ item.mssv }}</td><td><span class="tag">{{ item.method }}</span></td><td>{{ item.checkedInAt | date:'dd/MM · HH:mm:ss' }}</td></tr><tr *ngIf="!dashboard.attendance.length"><td colspan="3" class="empty">Chưa có lượt điểm danh.</td></tr></tbody></table></div></article>
+    <article class="data-panel compact-panel"><div class="table-heading"><div><p class="eyebrow">HỆ THỐNG</p><h2>Nhật ký realtime</h2></div><span class="count-badge">{{ dashboard.logs.length }} bản ghi</span></div><div class="table-wrap"><table><thead><tr><th>Thời gian</th><th>Mức độ</th><th>MSSV</th><th>Kết quả</th></tr></thead><tbody><tr *ngFor="let log of dashboard.logs"><td>{{ log.createdAt | date:'dd/MM · HH:mm:ss' }}</td><td><span [class]="'level ' + log.level.toLowerCase()">{{ log.level }}</span></td><td class="mssv">{{ log.mssv }}</td><td>{{ log.result }}</td></tr><tr *ngIf="!dashboard.logs.length"><td colspan="4" class="empty">Chưa có nhật ký hệ thống.</td></tr></tbody></table></div></article>
+  </section>
+  <p *ngIf="message" class="message" role="status" [class.error]="isError">{{ message }}</p>
+</main>

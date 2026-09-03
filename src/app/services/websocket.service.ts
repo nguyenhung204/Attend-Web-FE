@@ -1,55 +1,20 @@
 import { Injectable } from '@angular/core';
 import { io, Socket } from 'socket.io-client';
+import { CheckInMethod } from './http.service';
+export interface AttendancePushedEvent { attendanceId: string; eventId: string; studentId: string; mssv: string; method: CheckInMethod; checkedInAt: string; }
 
-@Injectable({
-  providedIn: 'root'
-})
+@Injectable({ providedIn: 'root' })
 export class WebSocketService {
-  private socket: Socket;
-
-  constructor() {
-    this.socket = io('https://bancongnghe.click', {
-      transports: ['websocket']
-    });
-
-    this.socket.on('connect', () => {
-      console.log('WebSocket connected');
-    });
-
-    this.socket.on('disconnect', () => {
-      console.log('WebSocket disconnected');
-    });
-
-    this.socket.on('error', (error: any) => {
-      console.error('WebSocket error:', error);
-    });
-
-    this.socket.on('requestAttendanceData', () => {
-      this.sendAttendanceData();
-    });
+  private readonly socket: Socket = io(window.location.origin, {
+    path: '/api/socket.io',
+    transports: ['websocket'],
+  });
+  private currentEventId?: string;
+  constructor() { this.socket.on('connect', () => { if (this.currentEventId) this.socket.emit('attendance.subscribe', { eventId: this.currentEventId }); }); }
+  subscribe(eventId: string, callback: (event: AttendancePushedEvent) => void): void {
+    if (this.currentEventId && this.currentEventId !== eventId) this.socket.emit('attendance.unsubscribe', { eventId: this.currentEventId });
+    this.currentEventId = eventId; this.socket.emit('attendance.subscribe', { eventId });
+    this.socket.off('attendance.checked-in'); this.socket.on('attendance.checked-in', callback);
   }
-
-  private sendAttendanceData() {
-    const attendanceData = localStorage.getItem('attendanceList');
-    if (attendanceData) {
-      const attendedStudents = JSON.parse(attendanceData).filter((student: any) => student.attendance);
-      this.socket.emit('attendanceData', attendedStudents);
-
-    } else {
-      console.log('No attendance data found in localStorage');
-    }
-  }
-
-  onAttendanceMarked(callback: (mssvList: string[]) => void) {
-    this.socket.on('attendanceMarked', (data: any) => {
-      const mssvArray = Array.isArray(data.mssvArray) ? data.mssvArray : data.mssvArray.split(',');
-      callback(mssvArray);
-      console.log( 'MSSV:', mssvArray);
-    });
-  }
-
-
-  disconnect() {
-    this.socket.disconnect();
-  }
+  disconnect(): void { this.socket.disconnect(); this.currentEventId = undefined; }
 }

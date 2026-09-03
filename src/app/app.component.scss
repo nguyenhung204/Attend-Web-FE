@@ -1,0 +1,42 @@
+.pull-refresh-indicator {
+  position: fixed;
+  top: 0;
+  left: 50%;
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 14px;
+  color: #fff;
+  background: #17253b;
+  border-radius: 0 0 12px 12px;
+  box-shadow: 0 6px 16px rgb(18 31 51 / 18%);
+  pointer-events: none;
+  transition: transform 160ms ease;
+
+  span {
+    font-size: 20px;
+    line-height: 1;
+  }
+
+  small {
+    font-size: 12px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+
+  &.is-ready {
+    background: #0d7a5f;
+  }
+
+  &.is-refreshing span {
+    animation: pull-refresh-spin 0.85s linear infinite;
+  }
+}
+
+@keyframes pull-refresh-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

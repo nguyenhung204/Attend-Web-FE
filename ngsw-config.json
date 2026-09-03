@@ -28,20 +28,15 @@
   ],
   "dataGroups": [
     {
-      "name": "attend-list",
+      "name": "events",
       "urls": [
-        "https://bancongnghe.click/google-sheets/mssv",
-        "https://bancongnghe.click/google-sheets/attendance-list"
+        "/api/events"
       ],
       "cacheConfig": {
-        "maxSize": 10000,
-        "maxAge": "6h",
-        "timeout": "3m",
-        "cacheOpaqueResponses": false,
+        "maxSize": 1,
+        "maxAge": "1h",
+        "timeout": "5s",
         "strategy": "freshness"
-      },
-      "cacheQueryOptions": {
-        "ignoreSearch": false
       }
     }
   ]

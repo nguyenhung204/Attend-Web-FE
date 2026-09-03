@@ -1,0 +1,79 @@
+<main class="check-in-page">
+  <section class="camera-area">
+    <div class="camera-frame">
+      <video *ngIf="isScanning" #scannerVideo autoplay muted playsinline></video>
+      <div *ngIf="isScanning" class="scan-guide"></div>
+      <div *ngIf="!isScanning" class="camera-state">
+        <span *ngIf="isLoading">Đang chuẩn bị…</span>
+        <mat-icon *ngIf="!isLoading && !isSubmitting && !isError" class="camera-off-icon" aria-label="Sẵn sàng quét mã">qr_code_scanner</mat-icon>
+        <span *ngIf="isError">Camera chưa sẵn sàng</span>
+      </div>
+    </div>
+    <button *ngIf="!isScanning" class="camera-button" type="button" (click)="startScanner()" [disabled]="isLoading || !selectedEventId">
+      Mở camera quét mã
+    </button>
+    <button *ngIf="isScanning" class="stop-button" type="button" (click)="stopScanner()">Dừng camera</button>
+    <button *ngIf="isScanning && torchAvailable" class="torch-button" type="button" (click)="toggleTorch()">{{ torchOn ? 'Tắt đèn camera' : 'Bật đèn camera' }}</button>
+    <div class="scan-status" *ngIf="isScanning"><span aria-hidden="true"></span>Đang quét mã</div>
+    <p class="scan-hint" *ngIf="isScanning">Đưa thẻ vào khung, nghiêng nhẹ để tránh lóa. Bật đèn khi thiếu sáng.</p>
+  </section>
+
+  <section class="sync-status" [class.offline]="isOffline" aria-live="polite">
+    <span *ngIf="networkStatus === 'CHECKING'">Đang kiểm tra hệ thống…</span>
+    <span>{{ isOffline ? 'Ngoại tuyến' : 'Đã kết nối' }}</span>
+    <span *ngIf="pendingCount">{{ pendingCount }} lượt chờ đồng bộ</span>
+    <span *ngIf="failedCount">{{ failedCount }} lượt cần kiểm tra</span>
+    <span *ngIf="usingCachedEvents">Danh sách sự kiện đã lưu</span>
+    <button *ngIf="pendingCount || failedCount" type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing || networkStatus === 'CHECKING'">
+      {{ isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ lại' }}
+    </button>
+  </section>
+
+  <button class="network-indicator" type="button" (click)="openQueueModal()"
+    [class.online]="networkStatus === 'ONLINE'" [class.checking]="networkStatus === 'CHECKING'"
+    [attr.aria-label]="networkStatusLabel" [title]="networkStatusLabel">
+    <span aria-hidden="true"></span>
+  </button>
+
+  <button class="sync-fab" *ngIf="pendingCount || failedCount" type="button" (click)="retryPendingCheckIns()"
+    [disabled]="isSyncing || networkStatus === 'CHECKING'">
+    {{ isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ ' + (pendingCount + failedCount) }}
+  </button>
+
+  <div *ngIf="isQueueModalOpen" class="queue-modal" role="dialog" aria-modal="true" aria-labelledby="queue-title" (click)="closeQueueModal()">
+    <section class="queue-card" (click)="$event.stopPropagation()">
+      <div class="queue-header"><h2 id="queue-title">Hàng đợi đồng bộ</h2><button type="button" (click)="closeQueueModal()" aria-label="Đóng">×</button></div>
+      <p *ngIf="!queueItems.length" class="queue-empty">Không có lượt điểm danh đang chờ.</p>
+      <ul *ngIf="queueItems.length" class="queue-list">
+        <li *ngFor="let item of queueItems" [class.failed]="item.status === 'FAILED'">
+          <div><strong>{{ item.mssv }}</strong><span>{{ formatCheckedInAt(item.capturedAt) }}</span></div>
+          <small>{{ item.status === 'PENDING' ? 'Chờ đồng bộ' : 'Cần thử lại' }}</small>
+        </li>
+      </ul>
+      <button *ngIf="queueItems.length" class="queue-sync" type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing || networkStatus === 'CHECKING'">
+        {{ isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ ngay' }}
+      </button>
+    </section>
+  </div>
+
+  <div class="toast" [class.error]="toastIsError" [class.is-visible]="!!toastMessage" role="alert" aria-live="assertive">{{ toastMessage }}</div>
+
+  <div *ngIf="resultDialog" class="check-in-modal" role="dialog" aria-modal="true" aria-labelledby="check-in-result-title">
+    <section class="modal-card" [class.already-checked-in]="resultDialog.status === 'ALREADY_CHECKED_IN'">
+      <p class="modal-kicker">{{ resultDialog.status === 'CHECKED_IN' ? 'XÁC NHẬN ĐIỂM DANH' : 'THÔNG TIN ĐIỂM DANH' }}</p>
+      <h1 id="check-in-result-title">{{ resultDialog.status === 'CHECKED_IN' ? 'Điểm danh thành công' : 'Sinh viên đã điểm danh' }}</h1>
+      <dl>
+        <div><dt>Họ và tên</dt><dd>{{ resultDialog.fullName }}</dd></div>
+        <div><dt>MSSV</dt><dd>{{ resultDialog.mssv }}</dd></div>
+        <div><dt>Thời gian</dt><dd>{{ formatCheckedInAt(resultDialog.checkedInAt) }}</dd></div>
+      </dl>
+      <button type="button" (click)="continueScanning()">Tiếp tục quét</button>
+    </section>
+  </div>
+
+  <form class="manual-entry" (ngSubmit)="checkIn()">
+    <input [(ngModel)]="mssv" name="mssv" maxlength="64" autocomplete="off" inputmode="text"
+      placeholder="Nhập mã sinh viên" aria-label="MSSV">
+    <button type="submit" [disabled]="isSubmitting || !mssv.trim()">{{ isSubmitting ? 'Đang điểm danh…' : 'Điểm danh' }}</button>
+  </form>
+</main>

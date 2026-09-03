@@ -1,3 +1,15 @@
 
-  <router-outlet></router-outlet>
+<div
+  class="pull-refresh-indicator"
+  [class.is-visible]="pullDistance > 0 || isRefreshing"
+  [class.is-ready]="pullDistance >= 76"
+  [class.is-refreshing]="isRefreshing"
+  [style.transform]="'translate(-50%, ' + pullIndicatorOffset + 'px)'"
+  aria-live="polite"
+>
+  <span aria-hidden="true">↻</span>
+  <small>{{ isRefreshing ? 'Đang đồng bộ...' : (pullDistance >= 76 ? 'Thả tay để đồng bộ' : 'Kéo xuống để đồng bộ') }}</small>
+</div>
+
+<router-outlet></router-outlet>
 
