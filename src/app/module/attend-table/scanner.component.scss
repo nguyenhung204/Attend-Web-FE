@@ -183,7 +183,15 @@
   border-radius:50%;
 }
 
-.scanner-toast>span { width:22px; height:22px; background:rgba(255,255,255,.17); font-weight:800; }
+.scanner-toast>span {
+  width:22px;
+  height:22px;
+  background:rgba(255,255,255,.17);
+  font-size:16px;
+  font-weight:800;
+  line-height:1;
+}
+.scanner-toast.rejected>span { padding-bottom:1px; }
 .scanner-toast p { margin:0; font-size:13px; line-height:1.35; }
 
 .auth-gate { position:absolute; z-index:60; inset:0; display:grid; place-items:center; padding:24px; background:#0f1213; }
