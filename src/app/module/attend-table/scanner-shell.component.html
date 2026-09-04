@@ -17,8 +17,10 @@
     </button>
   </header>
 
-  <div *ngIf="toastMessage" class="scanner-toast" [class.error]="toastIsError" role="status" aria-live="polite">
-    <span>{{ toastIsError ? '!' : '✓' }}</span>
+  <div *ngIf="toastMessage" class="scanner-toast" [class.success]="toastKind === 'success'"
+    [class.duplicate]="toastKind === 'duplicate'" [class.rejected]="toastKind === 'rejected'"
+    [class.info]="toastKind === 'info'" [class.error]="toastKind === 'error'" role="status" aria-live="polite">
+    <span>{{ toastIcon }}</span>
     <p>{{ toastMessage }}</p>
   </div>
 
@@ -120,11 +122,13 @@
     <div class="history-list">
       <article *ngFor="let item of recentCheckIns" class="history-row"
         [class.queued]="item.status === 'QUEUED'" [class.checked-in]="item.status === 'SYNCED' && item.outcome === 'ADMITTED'"
-        [class.already-checked-in]="item.status === 'CONFLICT'" [class.error]="item.status === 'REJECTED' || item.status === 'ERROR'">
+        [class.undone]="item.status === 'SYNCED' && item.outcome === 'UNDONE'"
+        [class.already-checked-in]="item.status === 'CONFLICT' || (item.status === 'SYNCED' && item.outcome === 'REJECTED_ALREADY_USED')"
+        [class.error]="item.status === 'REJECTED' || item.status === 'ERROR' || (item.status === 'SYNCED' && (item.outcome === 'REJECTED_NOT_FOUND' || item.outcome === 'REJECTED_CANCELLED'))">
         <span class="history-icon">{{ recentIcon(item) }}</span>
         <div>
           <strong>{{ item.holderName || item.ticketCode }}</strong>
-          <small>{{ item.holderName ? item.ticketCode + ' · ' : '' }}{{ item.message || recentLabel(item) }}</small>
+          <small>{{ item.holderName ? item.ticketCode + ' · ' : '' }}{{ recentDescription(item) }}</small>
         </div>
         <time>{{ item.createdAt | date:'HH:mm:ss' }}</time>
       </article>

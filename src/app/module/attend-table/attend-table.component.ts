@@ -16,6 +16,7 @@ interface ScannerTrackSettings {
 }
 
 type RecentCheckIn = ScanHistoryItem;
+type ToastKind = 'success' | 'duplicate' | 'rejected' | 'info' | 'error';
 @Component({ selector: 'app-attend-table', templateUrl: './scanner-shell.component.html', styleUrls: ['./scanner.component.scss'] })
 
 
@@ -27,7 +28,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   readonly keypadDigits = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
   activeTab: 'scan' | 'manual' | 'history' = 'scan';
   isEventPickerOpen = true;
-  isLoading = true; isScanning = false; isSubmitting = false; torchAvailable = false; torchOn = false; toastMessage = ''; toastIsError = false;
+  isLoading = true; isScanning = false; isSubmitting = false; torchAvailable = false; torchOn = false; toastMessage = ''; toastKind: ToastKind = 'info';
   pendingCount = 0; failedCount = 0; pendingRequestCount = 0; isSyncing = false; usingCachedEvents = false;
   rosterReady = false;
   queueItems: QueuedScan[] = [];
@@ -89,7 +90,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     void this.loadRecentCheckIns();
     void this.refreshRosterAvailability();
     void this.syncSelectedEvent();
-    this.showToast('Đã chọn ' + event.name + '.', false);
+    this.showToast('Đã chọn ' + event.name + '.', 'info');
   }
   eventStatusLabel(event: EventSummary): string {
     return event.isLive ? 'Đang mở cổng' : 'Đã đóng cổng';
@@ -101,19 +102,43 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     return [event.eventDate, event.startsAt && event.endsAt ? `${event.startsAt} – ${event.endsAt}` : event.startsAt].filter(Boolean).join(' · ');
   }
   recentIcon(item: RecentCheckIn): string {
-    if (item.status === 'SYNCED') return item.outcome === 'ADMITTED' ? '✓' : '×';
-    if (item.status === 'CONFLICT') return '↻';
-    if (item.status === 'REJECTED') return '!';
-    if (item.status === 'ERROR') return '!';
     if (item.status === 'QUEUED') return '↥';
+    if (item.status === 'ERROR') return '!';
+    if (item.status === 'CONFLICT' || item.outcome === 'REJECTED_ALREADY_USED') return '↻';
+    if (item.status === 'REJECTED' || item.outcome === 'REJECTED_NOT_FOUND' || item.outcome === 'REJECTED_CANCELLED') return '×';
+    if (item.outcome === 'UNDONE') return '↶';
+    if (item.status === 'SYNCED' && item.outcome === 'ADMITTED') return '✓';
     return '…';
   }
   recentLabel(item: RecentCheckIn): string {
-    const labels: Record<RecentCheckIn['status'], string> = {
-      QUEUED: 'Đã lưu, chờ đồng bộ', SYNCED: item.outcome === 'ADMITTED' ? 'Đã điểm danh' : 'Không thể điểm danh',
-      REJECTED: 'Server từ chối lượt quét', CONFLICT: 'Xung đột với lượt quét khác', ERROR: 'Cần kiểm tra',
+    if (item.status === 'ERROR') return 'Lỗi đồng bộ; dữ liệu vẫn được giữ trên thiết bị.';
+    if (item.status === 'CONFLICT') return 'Trùng: đã điểm danh trước đó.';
+
+    const outcomeLabels: Record<ScanOutcome, string> = {
+      ADMITTED: item.status === 'QUEUED' ? 'Đã lưu điểm danh, chờ đồng bộ.' : 'Điểm danh thành công.',
+      REJECTED_ALREADY_USED: item.status === 'QUEUED'
+        ? 'Trùng: đã điểm danh trước đó; chờ đồng bộ bản ghi.'
+        : 'Trùng: đã điểm danh trước đó.',
+      REJECTED_NOT_FOUND: item.status === 'QUEUED'
+        ? 'Không có trong danh sách điểm danh; chờ đồng bộ bản ghi.'
+        : 'Không thể điểm danh: mã không có trong danh sách.',
+      REJECTED_CANCELLED: item.status === 'QUEUED'
+        ? 'Vé đã bị hủy; chờ đồng bộ bản ghi.'
+        : 'Không thể điểm danh: vé đã bị hủy.',
+      UNDONE: item.status === 'QUEUED' ? 'Đã lưu hoàn tác, chờ đồng bộ.' : 'Đã hoàn tác điểm danh.',
     };
-    return labels[item.status];
+    return outcomeLabels[item.outcome];
+  }
+  recentDescription(item: RecentCheckIn): string {
+    if (item.status === 'ERROR') return item.message || this.recentLabel(item);
+    if (item.status === 'CONFLICT') {
+      const detail = item.message?.trim();
+      if (!detail || detail === 'Điểm danh thành công.' || detail === 'Đã điểm danh trước đó.') {
+        return 'Trùng: đã điểm danh trước đó.';
+      }
+      return detail.startsWith('Trùng:') ? detail : 'Trùng: ' + detail;
+    }
+    return this.recentLabel(item);
   }
   get manualDigits(): string[] {
     return Array.from({ length: this.manualCodeLength }, (_, index) => this.mssv[index] ?? '');
@@ -257,7 +282,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       const ticket = await this.offlineQueue.getTicket(event.eventId, ticketCode);
       const pending = await this.offlineQueue.pendingTicket(event.eventId, ticketCode);
       if (pending) {
-        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), false);
+        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), 'duplicate');
         return;
       }
       const outcome = this.outcomeFor(ticket, pending);
@@ -275,11 +300,14 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       };
       const enqueued = await this.offlineQueue.enqueue(scan, ticket?.holderName);
       if (!enqueued) {
-        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), false);
+        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), 'duplicate');
         return;
       }
       await this.loadRecentCheckIns();
-      this.showToast(this.attendanceToastMessage(outcome, ticket?.holderName || ticketCode), false);
+      this.showToast(
+        this.attendanceToastMessage(outcome, ticket?.holderName || ticketCode),
+        this.toastKindForOutcome(outcome),
+      );
       if (this.networkStatus === 'ONLINE') await this.pushQueuedScans(event.eventId);
     } catch (error) {
       this.showErrorMessage('Không thể lưu lượt quét trên thiết bị.');
@@ -293,6 +321,18 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       await this.refreshQueueItems();
       this.changeDetector.detectChanges();
     }
+  }
+
+  get toastIcon(): string {
+    const icons: Record<ToastKind, string> = { success: '✓', duplicate: '↻', rejected: '×', info: 'i', error: '!' };
+    return icons[this.toastKind];
+  }
+
+  private toastKindForOutcome(outcome: ScanOutcome): ToastKind {
+    if (outcome === 'ADMITTED') return 'success';
+    if (outcome === 'REJECTED_ALREADY_USED') return 'duplicate';
+    if (outcome === 'REJECTED_NOT_FOUND' || outcome === 'REJECTED_CANCELLED') return 'rejected';
+    return 'info';
   }
 
   private attendanceToastMessage(outcome: ScanOutcome, attendee: string): string {
@@ -375,10 +415,12 @@ export class AttendTableComponent implements OnInit, OnDestroy {
           if (!acks.length) break;
           await this.offlineQueue.acknowledge(acks.map(ack => ack.clientEventId));
           for (const ack of acks) {
-            await this.offlineQueue.updateHistory(ack.clientEventId, {
-              status: ack.accepted ? 'SYNCED' : 'CONFLICT',
-              message: ack.accepted ? 'Điểm danh thành công.' : ack.conflictReason || 'Đã điểm danh trước đó.',
-            });
+            const queuedItem = queued.find(item => item.clientEventId === ack.clientEventId);
+            if (!queuedItem) continue;
+            await this.offlineQueue.updateHistory(
+              ack.clientEventId,
+              this.resolvedHistoryStatus(queuedItem.payload.outcome, ack.accepted, ack.conflictReason, ack.duplicate),
+            );
           }
         } catch (error) {
           const message = this.errorMessage(error as HttpErrorResponse);
@@ -400,6 +442,32 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       await this.refreshQueueSummary();
       await this.refreshQueueItems();
     }
+  }
+
+  private resolvedHistoryStatus(
+    outcome: ScanOutcome,
+    accepted: boolean,
+    conflictReason?: string | null,
+    duplicate = false,
+  ): Pick<ScanHistoryItem, 'status' | 'message'> {
+    if (outcome === 'REJECTED_ALREADY_USED' || duplicate) {
+      const reason = conflictReason?.trim();
+      return { status: 'CONFLICT', message: reason ? 'Trùng: ' + reason : 'Trùng: đã điểm danh trước đó.' };
+    }
+    if (outcome === 'REJECTED_NOT_FOUND') {
+      return { status: 'REJECTED', message: 'Không thể điểm danh: mã không có trong danh sách.' };
+    }
+    if (outcome === 'REJECTED_CANCELLED') {
+      return { status: 'REJECTED', message: 'Không thể điểm danh: vé đã bị hủy.' };
+    }
+    if (!accepted) {
+      const reason = conflictReason?.trim();
+      return { status: 'REJECTED', message: reason ? 'Không thể điểm danh: ' + reason : 'Không thể điểm danh: server từ chối lượt quét.' };
+    }
+    if (outcome === 'UNDONE') {
+      return { status: 'SYNCED', message: 'Đã hoàn tác điểm danh.' };
+    }
+    return { status: 'SYNCED', message: 'Điểm danh thành công.' };
   }
 
   private acceptScannedCode(scanKey: string): boolean {
@@ -444,7 +512,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       if (this.selectedEventId) void this.refreshRosterAvailability();
       else this.isEventPickerOpen = true;
       if (this.selectedEventId) {
-        this.showToast('Đang dùng danh sách sự kiện đã lưu trên thiết bị.', false);
+        this.showToast('Đang dùng danh sách sự kiện đã lưu trên thiết bị.', 'info');
         return;
       }
     }
@@ -622,15 +690,15 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     };
     return messages[error.error?.error] || error.error?.message || 'Không thể kết nối đến hệ thống điểm danh. Vui lòng thử lại.';
   }
-  private showErrorMessage(message: string): void { this.showToast(message, true); }
-  private showToast(message: string, isError: boolean): void {
+  private showErrorMessage(message: string): void { this.showToast(message, 'error'); }
+  private showToast(message: string, kind: ToastKind): void {
     this.toastMessage = message;
-    this.toastIsError = isError;
+    this.toastKind = kind;
     this.changeDetector.detectChanges();
     if (this.toastTimer) clearTimeout(this.toastTimer);
     this.toastTimer = setTimeout(() => {
       this.toastMessage = '';
-      this.toastIsError = false;
+      this.toastKind = 'info';
       this.changeDetector.detectChanges();
     }, 2000);
   }

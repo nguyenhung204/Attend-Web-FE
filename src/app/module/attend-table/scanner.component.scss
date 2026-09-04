@@ -170,7 +170,10 @@
   animation:drop .22s ease-out;
 }
 
+.scanner-toast.duplicate { border-color:rgba(255,215,88,.5); background:#443b1c; }
+.scanner-toast.rejected,
 .scanner-toast.error { border-color:rgba(255,111,104,.52); background:#4a2427; }
+.scanner-toast.info { border-color:rgba(91,172,255,.45); background:#17364a; }
 .scanner-toast>span,
 .history-icon,
 .offline-queue article>span {
@@ -452,6 +455,7 @@
 .history-row time { color:rgba(255,255,255,.46); font-size:11px; }
 .history-row time { font-variant-numeric:tabular-nums; }
 .history-row.checked-in .history-icon { background:rgba(33,141,174,.2); color:#2bbbd7; }
+.history-row.undone .history-icon { background:rgba(151,117,250,.17); color:#b49aff; }
 .history-row.already-checked-in .history-icon { background:rgba(255,215,88,.16); color:#ffd758; }
 .history-row.error .history-icon { background:rgba(237,73,73,.17); color:#ff7b73; }
 .history-row.queued .history-icon { background:rgba(43,187,215,.14); color:#2bbbd7; }
