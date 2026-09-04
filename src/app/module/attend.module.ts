@@ -1,26 +1,19 @@
-import { NgModule } from "@angular/core";
-import { AttendTableComponent } from "./attend-table/attend-table.component";
-import { CommonModule } from "@angular/common";
-import { RouterModule } from "@angular/router";
-import {FormsModule} from "@angular/forms";
-import {AttendRoutingModule} from "./attend-routing.module";
-import { AdminComponent } from './admin/admin.component';
-import { MatIconModule } from '@angular/material/icon';
+import { NgModule } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { RouterModule } from '@angular/router';
+import { AttendTableComponent } from './attend-table/attend-table.component';
+import { AttendRoutingModule } from './attend-routing.module';
 
 @NgModule({
   declarations: [
-    AttendTableComponent,
-    AdminComponent
+    AttendTableComponent
   ],
   imports: [
     AttendRoutingModule,
     CommonModule,
     RouterModule,
     FormsModule,
-    MatIconModule,
-  ],
-  providers: [
-
   ]
 })
 export class AttendModule { }

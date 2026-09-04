@@ -64,6 +64,51 @@
   white-space:nowrap;
 }
 
+.event-back {
+  flex:none;
+  padding:7px 9px;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:8px;
+  background:#171c1d;
+  color:rgba(255,255,255,.78);
+  font:inherit;
+  font-size:11px;
+  font-weight:700;
+  cursor:pointer;
+}
+
+.header-actions {
+  display:flex;
+  align-items:center;
+  gap:8px;
+  flex:none;
+}
+
+.logout-button {
+  display:grid;
+  place-items:center;
+  width:34px;
+  height:34px;
+  padding:0;
+  border:1px solid rgba(255,255,255,.12);
+  border-radius:8px;
+  background:#171c1d;
+  color:rgba(255,255,255,.78);
+  cursor:pointer;
+}
+
+.logout-button svg {
+  width:18px;
+  height:18px;
+  fill:none;
+  stroke:currentColor;
+  stroke-width:2;
+  stroke-linecap:round;
+  stroke-linejoin:round;
+}
+
+.logout-button:active { background:#242b2d; color:#fff; }
+
 .connection-state,
 .event-picker header button {
   display:grid;
@@ -137,6 +182,13 @@
 
 .scanner-toast>span { width:22px; height:22px; background:rgba(255,255,255,.17); font-weight:800; }
 .scanner-toast p { margin:0; font-size:13px; line-height:1.35; }
+
+.auth-gate { position:absolute; z-index:60; inset:0; display:grid; place-items:center; padding:24px; background:#0f1213; }
+.auth-card { width:100%; max-width:320px; text-align:center; }
+.auth-card p { margin:0; color:#2bbbd7; font-size:10px; font-weight:800; letter-spacing:1px; }
+.auth-card h1 { margin:10px 0; font-size:24px; line-height:1.25; }
+.auth-card span { display:block; color:rgba(255,255,255,.56); font-size:13px; line-height:1.55; }
+.auth-card button { width:100%; height:48px; margin-top:22px; border:0; border-radius:999px; background:#218dae; color:#fff; font:inherit; font-size:14px; font-weight:750; cursor:pointer; }
 
 .scanner-screen { flex:1; min-height:0; }
 .scan-screen { display:flex; flex-direction:column; }
@@ -322,6 +374,16 @@
 .manual-form label { color:rgba(255,255,255,.75); font-size:13px; font-weight:700; }
 .manual-form small { min-height:34px; color:rgba(255,255,255,.42); font-size:12px; line-height:1.45; }
 
+.manual-code-entry { position:relative; }
+.ticket-code-input {
+  position:absolute;
+  inset:0;
+  z-index:1;
+  width:100%;
+  height:100%;
+  opacity:0;
+  cursor:text;
+}
 .otp-inputs { display:grid; grid-template-columns:repeat(8,1fr); gap:6px; }
 .otp-inputs span {
   display:grid;

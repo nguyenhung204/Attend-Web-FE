@@ -1,13 +1,19 @@
 <main class="scanner-app">
   <header class="scanner-header">
     <button class="event-summary" type="button" (click)="openEventPicker()" [disabled]="isLoading">
-      <span class="event-kicker">{{ selectedEvent ? 'SỰ KIỆN ĐANG CHỌN' : 'ĐIỂM DANH SINH VIÊN' }}</span>
-      <span class="event-title">{{ selectedEvent?.name || (isLoading ? 'Đang tải sự kiện…' : 'Chưa có sự kiện đang mở') }}</span>
+      <span class="event-kicker">{{ selectedEvent ? 'SỰ KIỆN ĐANG CHỌN' : 'MÁY SOÁT VÉ' }}</span>
+      <span class="event-title">{{ selectedEvent?.name || (isLoading ? 'Đang tải sự kiện…' : 'Chọn sự kiện để bắt đầu') }}</span>
     </button>
+    <div *ngIf="authState === 'ready'" class="header-actions">
+      <button *ngIf="selectedEvent" class="event-back" type="button" (click)="openEventPicker()" aria-label="Quay lại chọn sự kiện">← Đổi</button>
+      <button class="logout-button" type="button" (click)="logout()" aria-label="Đăng xuất" title="Đăng xuất">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h4M14 8l4 4-4 4m4-4H9"/></svg>
+      </button>
+    </div>
     <button class="connection-state" type="button" (click)="selectTab('history')" [class.online]="networkStatus === 'ONLINE'"
       [class.checking]="networkStatus === 'CHECKING'" [attr.aria-label]="networkStatusLabel" [title]="networkStatusLabel">
       <span></span>
-      <em *ngIf="pendingCount || failedCount">{{ pendingCount + failedCount }}</em>
+      <em *ngIf="pendingCount">{{ pendingCount }}</em>
     </button>
   </header>
 
@@ -15,6 +21,12 @@
     <span>{{ toastIsError ? '!' : '✓' }}</span>
     <p>{{ toastMessage }}</p>
   </div>
+
+  <section *ngIf="authState !== 'ready'" class="auth-gate" role="dialog" aria-live="polite">
+    <div class="auth-card" *ngIf="authState === 'loading'"><p>ĐANG KIỂM TRA PHIÊN</p><h1>Đang chuẩn bị máy soát vé…</h1></div>
+    <div class="auth-card" *ngIf="authState === 'login'"><p>ĐĂNG NHẬP BẮT BUỘC</p><h1>Đăng nhập bằng Zalo</h1><span>Phiên đăng nhập giúp hệ thống xác nhận quyền soát vé trước khi tải sự kiện.</span><button type="button" (click)="startLogin()">Đăng nhập Zalo</button></div>
+    <div class="auth-card" *ngIf="authState === 'pending'"><p>ĐANG CHỜ CẤP QUYỀN</p><h1>Tài khoản chưa được phép soát vé.</h1><span>Quản trị viên cần gán tài khoản vào đơn vị trước khi bạn tiếp tục.</span></div>
+  </section>
 
   <section *ngIf="activeTab === 'scan'" class="scanner-screen scan-screen">
     <div class="camera-stage" [class.is-live]="isScanning">
@@ -25,7 +37,7 @@
           <i></i><i></i><i></i><i></i>
         </div>
         <strong>{{ isLoading ? 'Đang chuẩn bị máy quét…' : 'Sẵn sàng quét mã' }}</strong>
-        <p>{{ selectedEvent ? 'Mở camera để bắt đầu điểm danh.' : 'Chọn sự kiện đang mở để tiếp tục.' }}</p>
+        <p>{{ selectedEvent ? (rosterReady ? 'Mở camera để bắt đầu quét vé.' : 'Đang tải danh sách vé an toàn trên thiết bị.') : 'Chọn sự kiện đang mở cổng để tiếp tục.' }}</p>
       </div>
 
       <ng-container *ngIf="isScanning">
@@ -49,9 +61,9 @@
     <div class="scan-actions">
       <div class="mini-stats">
         <div><strong>{{ checkedInCount }}</strong><span>Đã điểm danh</span></div>
-        <div><strong>{{ issueCount }}</strong><span>Cần kiểm tra</span></div>
+        <div><strong>{{ issueCount }}</strong><span>Không thể điểm danh</span></div>
       </div>
-      <button *ngIf="!isScanning" class="primary-action" type="button" (click)="startScanner()" [disabled]="isLoading || !selectedEventId">
+      <button *ngIf="!isScanning" class="primary-action" type="button" (click)="startScanner()" [disabled]="isLoading || !selectedEventId || !rosterReady">
         <span aria-hidden="true">⌁</span>Mở camera quét mã
       </button>
       <button *ngIf="isScanning" class="secondary-action" type="button" (click)="stopScanner()">Dừng camera</button>
@@ -61,17 +73,20 @@
   <section *ngIf="activeTab === 'manual'" class="scanner-screen manual-screen">
     <div class="manual-heading">
       <p>NHẬP THỦ CÔNG</p>
-      <h1>Điểm danh bằng MSSV</h1>
-      <span>Nhập mã sinh viên in trên thẻ khi không quét được QR.</span>
+      <h1>Quét vé bằng mã</h1>
+      <span>Nhập mã vé khi không quét được QR hoặc mã vạch.</span>
     </div>
     <form class="manual-form" (ngSubmit)="checkIn()">
-      <label>MSSV gồm 8 chữ số</label>
-      <div class="otp-inputs" role="group" aria-label="MSSV gồm 8 chữ số">
-        <span *ngFor="let digit of manualDigits; let index = index" [class.filled]="!!digit" [class.active]="!digit && index === mssv.length">
-          {{ digit }}
-        </span>
+      <label>Mã vé ({{ manualCodeLength }} ký tự)</label>
+      <div class="manual-code-entry">
+        <input class="ticket-code-input" [(ngModel)]="mssv" name="ticketCode" [maxlength]="64" autocomplete="off" aria-label="Mã vé">
+        <div class="otp-inputs" role="group" aria-label="Mã vé">
+          <span *ngFor="let digit of manualDigits; let index = index" [class.filled]="!!digit" [class.active]="!digit && index === mssv.length">
+            {{ digit }}
+          </span>
+        </div>
       </div>
-      <small id="manual-note">{{ isSubmitting ? 'Đang gửi điểm danh…' : (isManualCodeComplete ? 'Đang xác nhận MSSV…' : 'Bấm các phím số. Hệ thống sẽ tự gửi khi đủ 8 số.') }}</small>
+      <small id="manual-note">{{ isSubmitting ? 'Đang lưu lượt quét…' : (isManualCodeComplete ? 'Sẵn sàng xác nhận mã vé.' : 'Bạn có thể nhập chữ, số, gạch ngang hoặc gạch dưới.') }}</small>
 
       <div class="number-keypad" aria-label="Bàn phím số">
         <button *ngFor="let digit of keypadDigits.slice(0, 9)" type="button" (click)="pressManualDigit(digit)" [disabled]="isSubmitting">{{ digit }}</button>
@@ -80,37 +95,36 @@
         <button class="key-muted" type="button" (click)="removeManualDigit()" [disabled]="isSubmitting || !mssv" aria-label="Xoá số cuối">⌫</button>
       </div>
 
-      <button class="primary-action manual-submit" type="submit" [disabled]="isSubmitting || !isManualCodeComplete">
-        {{ isSubmitting ? 'Đang gửi yêu cầu…' : 'Tự động xác nhận khi nhập đủ 8 số' }}
+      <button class="primary-action manual-submit" type="submit" [disabled]="isSubmitting || !mssv.trim() || !rosterReady">
+        {{ isSubmitting ? 'Đang lưu lượt quét…' : 'Xác nhận mã vé' }}
       </button>
     </form>
   </section>
 
   <section *ngIf="activeTab === 'history'" class="scanner-screen history-screen">
     <div class="history-stats">
-      <div><strong>{{ checkedInCount }}</strong><span>Thành công</span></div>
-      <div><strong>{{ issueCount }}</strong><span>Cần kiểm tra</span></div>
-      <div><strong>{{ pendingCount + failedCount }}</strong><span>Chờ đồng bộ</span></div>
+      <div><strong>{{ checkedInCount }}</strong><span>Đã điểm danh</span></div>
+      <div><strong>{{ issueCount }}</strong><span>Không thể điểm danh</span></div>
+      <div><strong>{{ pendingCount }}</strong><span>Chờ đồng bộ</span></div>
     </div>
 
     <div class="history-heading">
       <div><p>LỊCH SỬ CA TRỰC</p><h1>Lượt quét gần đây</h1></div>
       <div class="history-actions">
-      <button *ngIf="pendingCount || failedCount" type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing">
+      <button *ngIf="pendingCount" type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing">
         {{ isSyncing ? 'Đang sync…' : 'Sync' }}
       </button>
-        <button *ngIf="recentCheckIns.length" type="button" (click)="clearRecentCheckIns()">Xoá</button>
       </div>
     </div>
 
     <div class="history-list">
-      <article *ngFor="let item of recentCheckIns" class="history-row" [class.sending]="item.status === 'SENDING'"
-        [class.queued]="item.status === 'QUEUED'" [class.checked-in]="item.status === 'CHECKED_IN'"
-        [class.already-checked-in]="item.status === 'ALREADY_CHECKED_IN'" [class.error]="item.status === 'ERROR'">
+      <article *ngFor="let item of recentCheckIns" class="history-row"
+        [class.queued]="item.status === 'QUEUED'" [class.checked-in]="item.status === 'SYNCED' && item.outcome === 'ADMITTED'"
+        [class.already-checked-in]="item.status === 'CONFLICT'" [class.error]="item.status === 'REJECTED' || item.status === 'ERROR'">
         <span class="history-icon">{{ recentIcon(item) }}</span>
         <div>
-          <strong>{{ item.fullName || item.mssv }}</strong>
-          <small>{{ item.fullName ? item.mssv + ' · ' : '' }}{{ item.message || recentLabel(item) }}</small>
+          <strong>{{ item.holderName || item.ticketCode }}</strong>
+          <small>{{ item.holderName ? item.ticketCode + ' · ' : '' }}{{ item.message || recentLabel(item) }}</small>
         </div>
         <time>{{ item.createdAt | date:'HH:mm:ss' }}</time>
       </article>
@@ -121,8 +135,8 @@
       <p>HÀNG CHỜ ĐỒNG BỘ</p>
       <article *ngFor="let item of queueItems">
         <span>↥</span>
-        <div><strong>{{ item.mssv }}</strong><small>{{ formatCheckedInAt(item.capturedAt) }}</small></div>
-        <em>{{ item.status === 'FAILED' ? 'Cần thử lại' : 'Đang chờ' }}</em>
+        <div><strong>{{ item.ticketCode }}</strong><small>{{ formatCheckedInAt(item.createdAt) }}</small></div>
+        <em>{{ item.attempts ? 'Đang chờ mạng' : 'Đang chờ' }}</em>
       </article>
     </div>
   </section>
@@ -133,20 +147,20 @@
     <button type="button" (click)="selectTab('history')" [class.active]="activeTab === 'history'"><span>◷</span>Lịch sử</button>
   </nav>
 
-  <section *ngIf="isEventPickerOpen" class="event-picker" role="dialog" aria-modal="true" aria-labelledby="event-picker-title">
+  <section *ngIf="authState === 'ready' && isEventPickerOpen" class="event-picker" role="dialog" aria-modal="true" aria-labelledby="event-picker-title">
     <header>
       <div><p>ĐIỂM DANH SINH VIÊN</p><h1 id="event-picker-title">Chọn sự kiện</h1></div>
-      <button type="button" (click)="isEventPickerOpen = false" aria-label="Đóng">×</button>
+      <button type="button" (click)="isEventPickerOpen = false" [disabled]="!selectedEvent" [attr.aria-label]="selectedEvent ? 'Quay lại màn quét' : 'Hãy chọn một sự kiện'">{{ selectedEvent ? '←' : '·' }}</button>
     </header>
     <button class="refresh-events" type="button" (click)="loadEvents()" [disabled]="isLoading">↻ {{ isLoading ? 'Đang tải…' : 'Làm mới danh sách' }}</button>
     <p *ngIf="usingCachedEvents" class="cached-events">Đang dùng danh sách sự kiện đã lưu trên thiết bị.</p>
     <div class="event-list">
-      <button *ngFor="let event of events" type="button" (click)="selectEvent(event)" [disabled]="event.status !== 'OPEN'"
-        [class.selected]="event.eventId === selectedEventId" [class.closed]="event.status !== 'OPEN'">
-        <span class="event-status" [class.open]="event.status === 'OPEN'">{{ eventStatusLabel(event) }}</span>
+      <button *ngFor="let event of events" type="button" (click)="selectEvent(event)" [disabled]="!event.isLive"
+        [class.selected]="event.eventId === selectedEventId" [class.closed]="!event.isLive">
+        <span class="event-status" [class.open]="event.isLive">{{ eventStatusLabel(event) }}</span>
         <strong>{{ event.name }}</strong>
         <small>{{ eventSchedule(event) }}</small>
-        <em>{{ event.eventId === selectedEventId ? 'Đang chọn' : (event.status === 'OPEN' ? 'Chọn sự kiện' : 'Chưa thể điểm danh') }}</em>
+        <em>{{ event.eventId === selectedEventId ? 'Đang chọn' : (event.isLive ? 'Chọn sự kiện' : 'Chưa thể quét vé') }}</em>
       </button>
       <p *ngIf="!isLoading && !events.length" class="history-empty">Chưa có sự kiện nào để hiển thị.</p>
     </div>

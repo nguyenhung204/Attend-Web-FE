@@ -1,176 +1,215 @@
 import { Injectable } from '@angular/core';
 import { DBSchema, openDB } from 'idb';
-import { CheckInMethod, EventSummary } from './http.service';
+import { EventSummary, ScanRequest, Ticket } from './http.service';
 
-export interface QueuedCheckIn {
-  requestId: string;
+export type LocalScanStatus = 'QUEUED' | 'SYNCED' | 'REJECTED' | 'CONFLICT' | 'ERROR';
+
+export interface QueuedScan {
+  clientEventId: string;
   eventId: string;
-  mssv: string;
-  method: CheckInMethod;
-  capturedAt: string;
-  status: 'PENDING' | 'FAILED';
+  ticketCode: string;
+  payload: ScanRequest;
+  createdAt: number;
+  attempts: number;
   lastError?: string;
 }
 
-export type CheckInHistoryStatus = 'SENDING' | 'QUEUED' | 'CHECKED_IN' | 'ALREADY_CHECKED_IN' | 'ERROR';
-
-export interface CheckInHistoryItem {
-  requestId: string;
+export interface ScanHistoryItem {
+  clientEventId: string;
   eventId: string;
-  mssv: string;
-  method: CheckInMethod;
-  createdAt: string;
-  status: CheckInHistoryStatus;
-  fullName?: string;
+  ticketCode: string;
+  outcome: ScanRequest['outcome'];
+  entryMode: ScanRequest['entryMode'];
+  createdAt: number;
+  status: LocalScanStatus;
+  holderName?: string;
   message?: string;
 }
 
-export class DuplicateQueuedCheckInError extends Error {
-  constructor(public readonly existing: QueuedCheckIn) {
-    super('This student already has a queued check-in for the event.');
-  }
+export interface SyncState {
+  eventId: string;
+  rosterVersion: number;
+  scansSince: number;
 }
 
 interface CachedEvents {
   id: 'events';
   events: EventSummary[];
-  cachedAt: string;
+  cachedAt: number;
 }
 
-interface AttendanceOfflineDb extends DBSchema {
-  'check-in-queue': {
-    key: string;
-    value: QueuedCheckIn;
-    indexes: { 'by-status': string; 'by-captured-at': string; 'by-event-mssv': [string, string] };
-  };
-  'cached-events': { key: string; value: CachedEvents };
-  'check-in-history': {
-    key: string;
-    value: CheckInHistoryItem;
-    indexes: { 'by-created-at': string; 'by-event-id': string };
-  };
+interface StoredTicket extends Ticket {
+  eventId: string;
+}
+
+interface DeviceState {
+  id: 'device';
+  deviceId: string;
+  sequence: number;
+}
+
+interface TempleKeeperOfflineDb extends DBSchema {
+  events: { key: string; value: CachedEvents };
+  tickets: { key: [string, string]; value: StoredTicket; indexes: { 'by-event': string } };
+  sync: { key: string; value: SyncState };
+  'scan-queue': { key: string; value: QueuedScan; indexes: { 'by-event': string; 'by-event-ticket': [string, string] } };
+  'scan-history': { key: string; value: ScanHistoryItem; indexes: { 'by-event': string } };
+  device: { key: string; value: DeviceState };
 }
 
 @Injectable({ providedIn: 'root' })
 export class OfflineCheckInQueueService {
-  private readonly database = openDB<AttendanceOfflineDb>('attendance-offline', 5, {
-    upgrade(db, oldVersion, _newVersion, transaction) {
-      const queue = oldVersion === 0
-        ? db.createObjectStore('check-in-queue', { keyPath: 'requestId' })
-        : transaction.objectStore('check-in-queue');
-      if (!queue.indexNames.contains('by-status')) queue.createIndex('by-status', 'status');
-      if (!queue.indexNames.contains('by-captured-at')) queue.createIndex('by-captured-at', 'capturedAt');
-      if (queue.indexNames.contains('by-event-mssv')) queue.deleteIndex('by-event-mssv');
-      queue.createIndex('by-event-mssv', ['eventId', 'mssv']);
-      if (oldVersion === 0) db.createObjectStore('cached-events', { keyPath: 'id' });
-
-      const history = db.objectStoreNames.contains('check-in-history')
-        ? transaction.objectStore('check-in-history')
-        : db.createObjectStore('check-in-history', { keyPath: 'requestId' });
-      if (!history.indexNames.contains('by-created-at')) history.createIndex('by-created-at', 'createdAt');
-      if (!history.indexNames.contains('by-event-id')) history.createIndex('by-event-id', 'eventId');
+  private readonly database = openDB<TempleKeeperOfflineDb>('templekeeper-offline', 1, {
+    upgrade(db) {
+      db.createObjectStore('events', { keyPath: 'id' });
+      const tickets = db.createObjectStore('tickets', { keyPath: ['eventId', 'ticketCode'] });
+      tickets.createIndex('by-event', 'eventId');
+      db.createObjectStore('sync', { keyPath: 'eventId' });
+      const queue = db.createObjectStore('scan-queue', { keyPath: 'clientEventId' });
+      queue.createIndex('by-event', 'eventId');
+      queue.createIndex('by-event-ticket', ['eventId', 'ticketCode']);
+      const history = db.createObjectStore('scan-history', { keyPath: 'clientEventId' });
+      history.createIndex('by-event', 'eventId');
+      db.createObjectStore('device', { keyPath: 'id' });
     },
   });
 
-  async add(eventId: string, mssv: string, method: CheckInMethod, requestId: string = crypto.randomUUID()): Promise<QueuedCheckIn> {
-    const database = await this.database;
-    const normalizedMssv = mssv.trim().toUpperCase();
-    const transaction = database.transaction('check-in-queue', 'readwrite');
-    const existing = await transaction.store.index('by-event-mssv').get([eventId, normalizedMssv]);
-    if (existing) throw new DuplicateQueuedCheckInError(existing);
-    const item: QueuedCheckIn = {
-      requestId, eventId, mssv: normalizedMssv, method,
-      capturedAt: new Date().toISOString(), status: 'PENDING',
-    };
-    await transaction.store.add(item);
-    await transaction.done;
-    return item;
+  async cacheEvents(events: EventSummary[]): Promise<void> {
+    await (await this.database).put('events', { id: 'events', events, cachedAt: Date.now() });
   }
 
-  async deduplicate(): Promise<number> {
+  async cachedEvents(): Promise<CachedEvents | undefined> {
+    return (await this.database).get('events', 'events');
+  }
+
+  async getSyncState(eventId: string): Promise<SyncState> {
+    return (await (await this.database).get('sync', eventId)) ?? { eventId, rosterVersion: 0, scansSince: 0 };
+  }
+
+  async saveRosterVersion(eventId: string, rosterVersion: number): Promise<void> {
     const database = await this.database;
-    const transaction = database.transaction('check-in-queue', 'readwrite');
-    const items = (await transaction.store.getAll()).sort((left, right) => left.capturedAt.localeCompare(right.capturedAt));
-    const seen = new Set<string>();
-    let removed = 0;
-    for (const item of items) {
-      const mssv = item.mssv.trim().toUpperCase();
-      const key = `${item.eventId}\u0000${mssv}`;
-      if (seen.has(key)) {
-        await transaction.store.delete(item.requestId);
-        removed += 1;
-      } else {
-        seen.add(key);
-        if (item.mssv !== mssv) await transaction.store.put({ ...item, mssv });
-      }
+    const current = await this.getSyncState(eventId);
+    await database.put('sync', { ...current, rosterVersion });
+  }
+
+  async saveScansSince(eventId: string, scansSince: number): Promise<void> {
+    const database = await this.database;
+    const current = await this.getSyncState(eventId);
+    await database.put('sync', { ...current, scansSince });
+  }
+
+  async applyRosterPage(eventId: string, tickets: Ticket[]): Promise<void> {
+    const database = await this.database;
+    const transaction = database.transaction('tickets', 'readwrite');
+    for (const ticket of tickets) {
+      const key: [string, string] = [eventId, ticket.ticketCode];
+      if (ticket.deleted) await transaction.store.delete(key);
+      else await transaction.store.put({ ...ticket, eventId, deleted: false });
     }
     await transaction.done;
-    return removed;
   }
 
-  async pending(): Promise<QueuedCheckIn[]> {
+  async getTicket(eventId: string, ticketCode: string): Promise<Ticket | undefined> {
+    const ticket = await (await this.database).get('tickets', [eventId, ticketCode]);
+    return ticket;
+  }
+
+  async hasRoster(eventId: string): Promise<boolean> {
+    return (await (await this.database).countFromIndex('tickets', 'by-event', eventId)) > 0;
+  }
+
+  async pendingTicket(eventId: string, ticketCode: string): Promise<boolean> {
+    return !!(await (await this.database).getFromIndex('scan-queue', 'by-event-ticket', [eventId, ticketCode]));
+  }
+
+  async enqueue(scan: ScanRequest, holderName?: string): Promise<void> {
     const database = await this.database;
-    return (await database.getAllFromIndex('check-in-queue', 'by-status', 'PENDING'))
-      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt));
-  }
-
-  async all(): Promise<QueuedCheckIn[]> {
-    return (await (await this.database).getAll('check-in-queue'))
-      .sort((left, right) => left.capturedAt.localeCompare(right.capturedAt));
-  }
-
-  async summary(): Promise<{ pending: number; failed: number }> {
-    const items = await (await this.database).getAll('check-in-queue');
-    return items.reduce((summary, item) => {
-      summary[item.status === 'PENDING' ? 'pending' : 'failed'] += 1;
-      return summary;
-    }, { pending: 0, failed: 0 });
-  }
-
-  async remove(requestId: string): Promise<void> { await (await this.database).delete('check-in-queue', requestId); }
-
-  async markFailed(requestId: string, message: string): Promise<void> {
-    const database = await this.database;
-    const item = await database.get('check-in-queue', requestId);
-    if (item) await database.put('check-in-queue', { ...item, status: 'FAILED', lastError: message });
-  }
-
-  async retryFailed(): Promise<void> {
-    const database = await this.database;
-    const failed = await database.getAllFromIndex('check-in-queue', 'by-status', 'FAILED');
-    await Promise.all(failed.map(item => database.put('check-in-queue', { ...item, status: 'PENDING', lastError: undefined })));
-  }
-
-  async cacheEvents(events: EventSummary[]): Promise<void> {
-    await (await this.database).put('cached-events', { id: 'events', events, cachedAt: new Date().toISOString() });
-  }
-
-  async cachedEvents(): Promise<CachedEvents | undefined> { return (await this.database).get('cached-events', 'events'); }
-
-  async saveHistory(item: CheckInHistoryItem): Promise<void> {
-    const database = await this.database;
-    const transaction = database.transaction('check-in-history', 'readwrite');
-    await transaction.store.put(item);
+    const transaction = database.transaction(['scan-queue', 'scan-history'], 'readwrite');
+    await transaction.objectStore('scan-queue').add({
+      clientEventId: scan.clientEventId,
+      eventId: scan.eventId,
+      ticketCode: scan.ticketCode,
+      payload: scan,
+      createdAt: Date.now(),
+      attempts: 0,
+    });
+    await transaction.objectStore('scan-history').put({
+      clientEventId: scan.clientEventId,
+      eventId: scan.eventId,
+      ticketCode: scan.ticketCode,
+      outcome: scan.outcome,
+      entryMode: scan.entryMode,
+      createdAt: scan.scannedAtWallClock,
+      status: 'QUEUED',
+      holderName,
+    });
     await transaction.done;
   }
 
-  async historyForEvent(eventId: string): Promise<CheckInHistoryItem[]> {
-    const database = await this.database;
-    return (await database.getAllFromIndex('check-in-history', 'by-event-id', eventId))
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  async pendingForEvent(eventId: string, limit = 500): Promise<QueuedScan[]> {
+    return (await (await this.database).getAllFromIndex('scan-queue', 'by-event', eventId))
+      .sort((left, right) => left.createdAt - right.createdAt)
+      .slice(0, limit);
   }
 
-  async updateHistory(requestId: string, changes: Partial<CheckInHistoryItem>): Promise<void> {
-    const database = await this.database;
-    const item = await database.get('check-in-history', requestId);
-    if (item) await database.put('check-in-history', { ...item, ...changes });
+  async queuedEvents(): Promise<string[]> {
+    const scans = await (await this.database).getAll('scan-queue');
+    return [...new Set(scans.map(scan => scan.eventId))];
   }
 
-  async clearHistoryForEvent(eventId: string): Promise<void> {
+  async all(): Promise<QueuedScan[]> {
+    return (await (await this.database).getAll('scan-queue')).sort((left, right) => left.createdAt - right.createdAt);
+  }
+
+  async summary(): Promise<{ pending: number }> {
+    return { pending: (await (await this.database).count('scan-queue')) };
+  }
+
+  async acknowledge(clientEventIds: string[]): Promise<void> {
     const database = await this.database;
-    const transaction = database.transaction('check-in-history', 'readwrite');
-    const keys = await transaction.store.index('by-event-id').getAllKeys(eventId);
-    for (const key of keys) await transaction.store.delete(key);
+    const transaction = database.transaction('scan-queue', 'readwrite');
+    for (const clientEventId of clientEventIds) await transaction.store.delete(clientEventId);
     await transaction.done;
+  }
+
+  async markAttempt(clientEventIds: string[], message: string): Promise<void> {
+    const database = await this.database;
+    const transaction = database.transaction('scan-queue', 'readwrite');
+    for (const clientEventId of clientEventIds) {
+      const queued = await transaction.store.get(clientEventId);
+      if (queued) await transaction.store.put({ ...queued, attempts: queued.attempts + 1, lastError: message });
+    }
+    await transaction.done;
+  }
+
+  async updateHistory(clientEventId: string, changes: Partial<ScanHistoryItem>): Promise<void> {
+    const database = await this.database;
+    const item = await database.get('scan-history', clientEventId);
+    if (item) await database.put('scan-history', { ...item, ...changes });
+  }
+
+  async historyForEvent(eventId: string): Promise<ScanHistoryItem[]> {
+    return (await (await this.database).getAllFromIndex('scan-history', 'by-event', eventId))
+      .sort((left, right) => right.createdAt - left.createdAt);
+  }
+
+  async deviceIdentity(): Promise<string> {
+    const database = await this.database;
+    const stored = await database.get('device', 'device');
+    if (stored) return stored.deviceId;
+    const device: DeviceState = { id: 'device', deviceId: crypto.randomUUID(), sequence: 0 };
+    await database.add('device', device);
+    return device.deviceId;
+  }
+
+  async nextDeviceSequence(): Promise<number> {
+    const database = await this.database;
+    const transaction = database.transaction('device', 'readwrite');
+    const stored = await transaction.store.get('device');
+    const state = stored ?? { id: 'device' as const, deviceId: crypto.randomUUID(), sequence: 0 };
+    const next = state.sequence + 1;
+    await transaction.store.put({ ...state, sequence: next });
+    await transaction.done;
+    return next;
   }
 }

@@ -3,16 +3,8 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { BrowserMultiFormatReader, IScannerControls } from '@zxing/browser';
 import { BarcodeFormat, DecodeHintType, Result } from '@zxing/library';
 import { firstValueFrom } from 'rxjs';
-import { CheckInMethod, CheckInResult, EventSummary, HttpService } from '../../services/http.service';
-import { CheckInHistoryItem, DuplicateQueuedCheckInError, OfflineCheckInQueueService, QueuedCheckIn } from '../../services/offline-check-in-queue.service';
-
-interface PendingCheckIn {
-  eventId: string;
-  mssv: string;
-  method: CheckInMethod;
-  requestId: string;
-  scanned: boolean;
-}
+import { EventSummary, HttpService, MeResponse, ScanEntryMode, ScanOutcome, ScanRecord, ScanRequest, Ticket } from '../../services/http.service';
+import { OfflineCheckInQueueService, QueuedScan, ScanHistoryItem } from '../../services/offline-check-in-queue.service';
 
 interface ScannerTrackCapabilities {
   focusMode?: string[];
@@ -23,25 +15,25 @@ interface ScannerTrackSettings {
   focusDistance?: number;
 }
 
-type RecentCheckIn = CheckInHistoryItem;
+type RecentCheckIn = ScanHistoryItem;
 @Component({ selector: 'app-attend-table', templateUrl: './scanner-shell.component.html', styleUrls: ['./scanner.component.scss'] })
 
 
 export class AttendTableComponent implements OnInit, OnDestroy {
   @ViewChild('scannerVideo') scannerVideo?: ElementRef<HTMLVideoElement>;
-  events: EventSummary[] = []; selectedEventId = ''; mssv = ''; method: CheckInMethod = 'MANUAL';
-  readonly manualCodeLength = 8;
+  events: EventSummary[] = []; selectedEventId = ''; mssv = ''; method: ScanEntryMode = 'MANUAL';
+  identity?: MeResponse;
+  authState: 'loading' | 'login' | 'pending' | 'ready' = 'loading';
   readonly keypadDigits = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
   activeTab: 'scan' | 'manual' | 'history' = 'scan';
-  isEventPickerOpen = false;
-  isLoading = true; isScanning = false; isSubmitting = false; isError = false; torchAvailable = false; torchOn = false; toastMessage = ''; toastIsError = false; resultDialog?: CheckInResult;
-  pendingCount = 0; failedCount = 0; pendingRequestCount = 0; isSyncing = false; usingCachedEvents = false;
-  isQueueModalOpen = false; queueItems: QueuedCheckIn[] = [];
+  isEventPickerOpen = true;
+  isLoading = true; isScanning = false; isSubmitting = false; torchAvailable = false; torchOn = false; toastMessage = ''; toastIsError = false;
+  pendingCount = 0; pendingRequestCount = 0; isSyncing = false; usingCachedEvents = false;
+  rosterReady = false;
+  queueItems: QueuedScan[] = [];
   recentCheckIns: RecentCheckIn[] = [];
   networkStatus: 'CHECKING' | 'ONLINE' | 'OFFLINE' = navigator.onLine ? 'CHECKING' : 'OFFLINE';
   private scannerControls?: IScannerControls; private toastTimer?: ReturnType<typeof setTimeout>; private syncTimer?: ReturnType<typeof setInterval>; private isCheckingConnectivity = false;
-  private activeRequestCount = 0;
-  private readonly pendingCheckIns: PendingCheckIn[] = [];
   private readonly activeScanKeys = new Set<string>();
   private readonly scanCooldowns = new Map<string, number>();
   private scannerReader?: BrowserMultiFormatReader;
@@ -52,26 +44,25 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   private readonly fallbackScanFormats = Object.values(BarcodeFormat).filter((format): format is BarcodeFormat => typeof format === 'number');
   private readonly priorityScanWindowMs = 850;
   private readonly fallbackQuietMs = 1200;
-  private historySaveChain = Promise.resolve();
-  private readonly maxConcurrentRequests = 2;
   private readonly scanCooldownMs = 2500;
   private readonly onlineHandler = () => { void this.refreshConnectivity(true); };
   private readonly offlineHandler = () => { this.setNetworkStatus('OFFLINE'); };
   constructor(private readonly api: HttpService, private readonly offlineQueue: OfflineCheckInQueueService, private readonly zone: NgZone, private readonly changeDetector: ChangeDetectorRef) { }
   ngOnInit(): void {
-    void this.prepareQueue();
     void this.requestPersistentStorage();
     window.addEventListener('online', this.onlineHandler); window.addEventListener('offline', this.offlineHandler);
     this.syncTimer = setInterval(() => void this.refreshConnectivity(true), 15000);
-    this.loadEvents(); void this.refreshConnectivity(true);
+    void this.loadIdentity();
+    void this.refreshConnectivity(true);
   }
   ngOnDestroy(): void {
     this.stopScanner(); if (this.toastTimer) clearTimeout(this.toastTimer); if (this.syncTimer) clearInterval(this.syncTimer);
     window.removeEventListener('online', this.onlineHandler); window.removeEventListener('offline', this.offlineHandler);
   }
   get selectedEvent(): EventSummary | undefined { return this.events.find(event => event.eventId === this.selectedEventId); }
-  get checkedInCount(): number { return this.recentCheckIns.filter(item => item.status === 'CHECKED_IN').length; }
-  get issueCount(): number { return this.recentCheckIns.filter(item => item.status === 'ALREADY_CHECKED_IN' || item.status === 'ERROR').length; }
+  get manualCodeLength(): number { return this.selectedEvent?.ticketCodeLength || 8; }
+  get checkedInCount(): number { return this.recentCheckIns.filter(item => item.status === 'SYNCED' && item.outcome === 'ADMITTED').length; }
+  get issueCount(): number { return this.recentCheckIns.filter(item => item.status === 'REJECTED' || item.status === 'CONFLICT' || item.status === 'ERROR').length; }
   selectTab(tab: 'scan' | 'manual' | 'history'): void {
     this.activeTab = tab;
     if (tab !== 'scan') this.stopScanner();
@@ -85,36 +76,39 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     this.isEventPickerOpen = true;
   }
   selectEvent(event: EventSummary): void {
-    if (event.status !== 'OPEN') return;
+    if (!event.isLive) return;
     this.selectedEventId = event.eventId;
     this.recentCheckIns = [];
+    this.rosterReady = false;
+    this.mssv = '';
+    this.activeTab = 'scan';
     this.isEventPickerOpen = false;
     void this.loadRecentCheckIns();
+    void this.refreshRosterAvailability();
+    void this.syncSelectedEvent();
     this.showToast('Đã chọn ' + event.name + '.', false);
   }
   eventStatusLabel(event: EventSummary): string {
-    const labels: Record<EventSummary['status'], string> = {
-      OPEN: 'Đang mở', DRAFT: 'Bản nháp', CLOSED: 'Đã đóng', CANCELLED: 'Đã huỷ',
-    };
-    return labels[event.status];
+    return event.isLive ? 'Đang mở cổng' : 'Đã đóng cổng';
   }
   eventSchedule(event: EventSummary): string {
-    const start = new Date(event.checkInStartAt);
-    const end = new Date(event.checkInEndAt);
-    if (Number.isNaN(start.valueOf()) || Number.isNaN(end.valueOf())) return 'Chưa đặt thời gian điểm danh';
-    return start.toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'short' }) + ' – ' + end.toLocaleTimeString('vi-VN', { timeStyle: 'short' });
+    if (event.scheduleLabel) return event.scheduleLabel;
+    if (!event.eventDate) return event.venue || 'Chưa đặt lịch';
+    if (event.allDay) return event.eventDate;
+    return [event.eventDate, event.startsAt && event.endsAt ? `${event.startsAt} – ${event.endsAt}` : event.startsAt].filter(Boolean).join(' · ');
   }
   recentIcon(item: RecentCheckIn): string {
-    if (item.status === 'CHECKED_IN') return '✓';
-    if (item.status === 'ALREADY_CHECKED_IN') return '↻';
+    if (item.status === 'SYNCED') return item.outcome === 'ADMITTED' ? '✓' : '×';
+    if (item.status === 'CONFLICT') return '↻';
+    if (item.status === 'REJECTED') return '!';
     if (item.status === 'ERROR') return '!';
     if (item.status === 'QUEUED') return '↥';
     return '…';
   }
   recentLabel(item: RecentCheckIn): string {
     const labels: Record<RecentCheckIn['status'], string> = {
-      SENDING: 'Đang gửi', QUEUED: 'Chờ đồng bộ', CHECKED_IN: 'Đã điểm danh',
-      ALREADY_CHECKED_IN: 'Đã điểm danh trước đó', ERROR: 'Cần kiểm tra',
+      QUEUED: 'Đã lưu, chờ đồng bộ', SYNCED: item.outcome === 'ADMITTED' ? 'Đã điểm danh' : 'Không thể điểm danh',
+      REJECTED: 'Server từ chối lượt quét', CONFLICT: 'Xung đột với lượt quét khác', ERROR: 'Cần kiểm tra',
     };
     return labels[item.status];
   }
@@ -134,21 +128,66 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     if (!this.isSubmitting) this.mssv = '';
   }
   loadEvents(): void {
+    if (this.authState !== 'ready') return;
     this.api.getEvents().subscribe({
       next: events => {
         this.events = events;
-        this.selectedEventId = events.find(event => event.status === 'OPEN')?.eventId ?? '';
+        if (!events.some(event => event.eventId === this.selectedEventId && event.isLive)) {
+          this.selectedEventId = '';
+          this.rosterReady = false;
+        }
         this.isLoading = false;
         this.usingCachedEvents = false;
         void this.offlineQueue.cacheEvents(events);
         void this.loadRecentCheckIns();
-        if (!this.selectedEventId) {
-          this.showErrorMessage('Hiện không có sự kiện đang mở để điểm danh.');
-          return;
-        }
+        if (this.selectedEventId) {
+          void this.refreshRosterAvailability();
+          void this.syncSelectedEvent();
+        } else this.isEventPickerOpen = true;
       },
-      error: error => void this.loadCachedEvents(error),
+      error: error => {
+        if (error instanceof HttpErrorResponse && (error.status === 401 || error.status === 403)) {
+          this.authState = error.status === 401 ? 'login' : 'pending';
+          this.isEventPickerOpen = false;
+          this.isLoading = false;
+        }
+        else void this.loadCachedEvents(error);
+      },
     });
+  }
+
+  startLogin(): void { window.location.assign(this.api.webLoginUrl()); }
+
+  async logout(): Promise<void> {
+    this.stopScanner();
+    try {
+      await firstValueFrom(this.api.logout());
+      this.identity = undefined;
+      this.authState = 'login';
+      this.events = [];
+      this.selectedEventId = '';
+      this.isEventPickerOpen = false;
+    } catch {
+      this.showErrorMessage('Không thể đăng xuất. Vui lòng thử lại.');
+    }
+  }
+
+  private async loadIdentity(): Promise<void> {
+    try {
+      this.identity = await firstValueFrom(this.api.me());
+      if (!this.identity.role) {
+        this.authState = 'pending';
+        this.isLoading = false;
+        this.isEventPickerOpen = false;
+        return;
+      }
+      this.authState = 'ready';
+      this.loadEvents();
+    } catch (error) {
+      this.isLoading = false;
+      this.authState = error instanceof HttpErrorResponse && error.status === 401 ? 'login' : 'pending';
+      this.isEventPickerOpen = false;
+    }
   }
   async startScanner(): Promise<void> {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -180,135 +219,163 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       this.showErrorMessage('Không thể bật đèn camera trên thiết bị này.');
     }
   }
-  checkIn(mssv = this.mssv, scanned = false): void {
-    const normalizedMssv = mssv.trim().replace(/\s+/g, '').toUpperCase();
-    const eventId = this.selectedEventId;
-    if (!eventId || !normalizedMssv || (!scanned && this.isSubmitting)) return;
-    if (!scanned && !/^\d{8}$/.test(normalizedMssv)) {
-      this.showErrorMessage('MSSV nhập tay cần đúng 8 chữ số.');
+  checkIn(ticketCode = this.mssv, scanned = false): void {
+    const normalizedCode = ticketCode.trim().replace(/\s+/g, '').toUpperCase();
+    const event = this.selectedEvent;
+    if (!event || !normalizedCode || (!scanned && this.isSubmitting)) return;
+    if (!/^[A-Z0-9_-]{1,64}$/.test(normalizedCode)) {
+      this.showErrorMessage('Mã vé chỉ gồm chữ, số, gạch ngang hoặc gạch dưới.');
       return;
     }
-    if (scanned && !/^[A-Z0-9]{4,32}$/.test(normalizedMssv)) {
-      this.showErrorMessage('Mã quét không hợp lệ. Vui lòng quét đúng mã sinh viên.');
-      return;
-    }
-    if (!scanned) this.method = 'MANUAL';
-    const method = this.method;
-    const scanKey = this.scanKey(eventId, normalizedMssv);
+    const scanKey = this.scanKey(event.eventId, normalizedCode);
     if (scanned && !this.acceptScannedCode(scanKey)) return;
-
-    const checkIn: PendingCheckIn = {
-      eventId, mssv: normalizedMssv, method, scanned, requestId: crypto.randomUUID(),
-    };
-    this.addRecentCheckIn(checkIn);
-    if (!scanned) {
-      this.isSubmitting = true;
-      this.mssv = '';
-    }
-
-    if (navigator.onLine && this.networkStatus !== 'OFFLINE') {
-      this.pendingCheckIns.push(checkIn);
-      this.updatePendingRequestCount();
-      this.drainCheckInRequests();
-      return;
-    }
-    void this.queueAndSubmit(checkIn).finally(() => this.finishCheckIn(checkIn));
+    this.isSubmitting = !scanned;
+    this.mssv = '';
+    void this.recordScan(event, normalizedCode, scanned ? this.method : 'MANUAL', scanned);
   }
 
   async retryPendingCheckIns(): Promise<void> {
-    await this.offlineQueue.retryFailed();
-    await this.refreshQueueSummary();
     await this.refreshConnectivity(true);
-    await this.refreshQueueItems();
   }
 
-  async openQueueModal(): Promise<void> {
-    await this.refreshQueueItems();
-    this.isQueueModalOpen = true;
-  }
-
-  closeQueueModal(): void { this.isQueueModalOpen = false; }
-
-  private drainCheckInRequests(): void {
-    while (this.activeRequestCount < this.maxConcurrentRequests && this.pendingCheckIns.length) {
-      const checkIn = this.pendingCheckIns.shift();
-      if (!checkIn) break;
-      this.activeRequestCount += 1;
-      this.updatePendingRequestCount();
-      const process = this.networkStatus === 'OFFLINE'
-        ? this.queueAndSubmit(checkIn)
-        : this.submitOnlineCheckIn(checkIn);
-      void process.finally(() => {
-        this.activeRequestCount -= 1;
-        this.finishCheckIn(checkIn);
-        this.updatePendingRequestCount();
-        this.drainCheckInRequests();
-      });
-    }
-    this.updatePendingRequestCount();
-  }
-
-  private async submitOnlineCheckIn(checkIn: PendingCheckIn): Promise<void> {
+  private async recordScan(event: EventSummary, ticketCode: string, entryMode: ScanEntryMode, scanned: boolean): Promise<void> {
+    const scanKey = this.scanKey(event.eventId, ticketCode);
     try {
-      const result = await firstValueFrom(this.api.checkIn(checkIn.eventId, checkIn.mssv, checkIn.method, checkIn.requestId));
-      this.isError = false;
-      this.updateRecentCheckIn(checkIn.requestId, {
-        status: result.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'ALREADY_CHECKED_IN',
-        fullName: result.fullName,
-        message: result.status === 'CHECKED_IN' ? 'Điểm danh thành công.' : 'Sinh viên đã điểm danh trước đó.',
-      });
-      this.showToast(
-        result.status === 'CHECKED_IN'
-          ? (result.fullName || result.mssv) + ' đã điểm danh.'
-          : (result.fullName || result.mssv) + ' đã điểm danh trước đó.',
-        false,
-      );
-    } catch (error) {
-      if (this.shouldRetry(error)) {
-        this.setNetworkStatus('OFFLINE');
-        await this.queueAndSubmit(checkIn);
+      if (!event.gateId) {
+        this.showErrorMessage('Sự kiện chưa có cổng soát vé để ghi nhận lượt quét.');
         return;
       }
-      this.updateRecentCheckIn(checkIn.requestId, {
-        status: 'ERROR',
-        message: this.errorMessage(error as HttpErrorResponse),
-      });
-      this.showError(error as HttpErrorResponse);
-    }
-  }
-
-  private async queueAndSubmit(checkIn: PendingCheckIn): Promise<void> {
-    try {
-      await this.offlineQueue.add(checkIn.eventId, checkIn.mssv, checkIn.method, checkIn.requestId);
-      this.updateRecentCheckIn(checkIn.requestId, { status: 'QUEUED', message: 'Đã lưu trên thiết bị, chờ đồng bộ.' });
-      this.showToast(
-        navigator.onLine
-          ? checkIn.mssv + ' đã được lưu, sẽ tự đồng bộ khi có mạng.'
-          : checkIn.mssv + ' đã được xếp vào hàng chờ đồng bộ.',
-        false,
-      );
+      const ticket = await this.offlineQueue.getTicket(event.eventId, ticketCode);
+      const pending = await this.offlineQueue.pendingTicket(event.eventId, ticketCode);
+      const outcome = this.outcomeFor(ticket, pending);
+      const scan: ScanRequest = {
+        clientEventId: crypto.randomUUID(),
+        eventId: event.eventId,
+        gateId: event.gateId,
+        ticketCode,
+        outcome,
+        undoesEventId: null,
+        scannedAtWallClock: Date.now(),
+        deviceSeq: await this.offlineQueue.nextDeviceSequence(),
+        deviceId: await this.offlineQueue.deviceIdentity(),
+        entryMode,
+      };
+      await this.offlineQueue.enqueue(scan, ticket?.holderName);
+      await this.loadRecentCheckIns();
+      this.showToast(this.attendanceToastMessage(outcome, ticket?.holderName || ticketCode), false);
+      if (this.networkStatus === 'ONLINE') await this.pushQueuedScans(event.eventId);
     } catch (error) {
-      if (error instanceof DuplicateQueuedCheckInError) {
-        this.updateRecentCheckIn(checkIn.requestId, { status: 'QUEUED', message: 'Mã này đã có trong hàng chờ đồng bộ.' });
-        this.showToast('MSSV ' + error.existing.mssv + ' đã có trong hàng chờ đồng bộ.', false);
-        return;
-      }
-      this.updateRecentCheckIn(checkIn.requestId, { status: 'ERROR', message: 'Không thể lưu lượt điểm danh trên thiết bị.' });
-      this.showErrorMessage('Không thể lưu lượt điểm danh trên thiết bị.');
+      this.showErrorMessage('Không thể lưu lượt quét trên thiết bị.');
     } finally {
+      this.isSubmitting = false;
+      if (scanned) {
+        this.activeScanKeys.delete(scanKey);
+        this.scanCooldowns.set(scanKey, Date.now());
+      }
+      await this.refreshQueueSummary();
+      await this.refreshQueueItems();
+      this.changeDetector.detectChanges();
+    }
+  }
+
+  private attendanceToastMessage(outcome: ScanOutcome, attendee: string): string {
+    switch (outcome) {
+      case 'ADMITTED': return attendee + ': đã điểm danh.';
+      case 'REJECTED_ALREADY_USED': return attendee + ': đã điểm danh trước đó.';
+      case 'REJECTED_NOT_FOUND': return attendee + ': không có trong danh sách điểm danh.';
+      case 'REJECTED_CANCELLED': return attendee + ': không thể điểm danh.';
+      default: return attendee + ': trạng thái điểm danh đã được cập nhật.';
+    }
+  }
+
+  private outcomeFor(ticket: Ticket | undefined, hasPendingScan: boolean): ScanOutcome {
+    if (!ticket) return 'REJECTED_NOT_FOUND';
+    if (ticket.status === 'CANCELLED') return 'REJECTED_CANCELLED';
+    if (ticket.status === 'USED' || hasPendingScan) return 'REJECTED_ALREADY_USED';
+    return 'ADMITTED';
+  }
+
+  private async syncSelectedEvent(): Promise<void> {
+    const event = this.selectedEvent;
+    if (!event || this.networkStatus !== 'ONLINE') return;
+    try {
+      await Promise.all([this.syncRoster(event), this.syncScanFeed(event), this.pushQueuedScans(event.eventId)]);
+      await this.loadRecentCheckIns();
+    } catch (error) {
+      if (this.shouldRetry(error)) this.setNetworkStatus('OFFLINE');
+    }
+  }
+
+  private async syncRoster(event: EventSummary): Promise<void> {
+    const state = await this.offlineQueue.getSyncState(event.eventId);
+    if (state.rosterVersion === event.rosterVersion) return;
+    let cursor = '0';
+    let version = state.rosterVersion;
+    let firstPage = true;
+    do {
+      const page = await firstValueFrom(this.api.getRoster(event.eventId, cursor, state.rosterVersion));
+      if (firstPage) {
+        version = page.version;
+        firstPage = false;
+      }
+      await this.offlineQueue.applyRosterPage(event.eventId, page.tickets);
+      cursor = page.nextCursor ?? '';
+    } while (cursor);
+    await this.offlineQueue.saveRosterVersion(event.eventId, version);
+    await this.refreshRosterAvailability();
+  }
+
+  private async syncScanFeed(event: EventSummary): Promise<void> {
+    let since = (await this.offlineQueue.getSyncState(event.eventId)).scansSince;
+    while (true) {
+      const feed = await firstValueFrom(this.api.getScans(event.eventId, since));
+      for (const scan of feed.scans) await this.applyServerScan(event.eventId, scan);
+      since = feed.nextSince;
+      if (!feed.scans.length) break;
+    }
+    await this.offlineQueue.saveScansSince(event.eventId, since);
+  }
+
+  private async applyServerScan(eventId: string, scan: ScanRecord): Promise<void> {
+    if (await this.offlineQueue.pendingTicket(eventId, scan.ticketCode)) return;
+    const ticket = await this.offlineQueue.getTicket(eventId, scan.ticketCode);
+    if (!ticket || !scan.accepted) return;
+    const status = scan.outcome === 'ADMITTED' ? 'USED' : scan.outcome === 'UNDONE' ? 'VALID' : ticket.status;
+    await this.offlineQueue.applyRosterPage(eventId, [{ ...ticket, status, checkedInAt: scan.scannedAtWallClock, checkedInAtGate: scan.gateName ?? null }]);
+  }
+
+  private async pushQueuedScans(eventId: string): Promise<void> {
+    if (this.isSyncing || this.networkStatus !== 'ONLINE') return;
+    this.isSyncing = true;
+    try {
+      while (true) {
+        const queued = await this.offlineQueue.pendingForEvent(eventId);
+        if (!queued.length) break;
+        try {
+          const { acks } = await firstValueFrom(this.api.postScans(queued.map(item => item.payload)));
+          if (!acks.length) break;
+          await this.offlineQueue.acknowledge(acks.map(ack => ack.clientEventId));
+          for (const ack of acks) {
+            await this.offlineQueue.updateHistory(ack.clientEventId, {
+              status: ack.accepted ? 'SYNCED' : 'CONFLICT',
+              message: ack.accepted ? 'Điểm danh thành công.' : ack.conflictReason || 'Đã điểm danh trước đó.',
+            });
+          }
+        } catch (error) {
+          const message = this.errorMessage(error as HttpErrorResponse);
+          if (this.shouldRetry(error)) {
+            await this.offlineQueue.markAttempt(queued.map(item => item.clientEventId), message);
+            break;
+          }
+          await this.offlineQueue.acknowledge(queued.map(item => item.clientEventId));
+          for (const item of queued) await this.offlineQueue.updateHistory(item.clientEventId, { status: 'REJECTED', message });
+        }
+      }
+    } finally {
+      this.isSyncing = false;
       await this.refreshQueueSummary();
       await this.refreshQueueItems();
     }
-  }
-
-  private finishCheckIn(checkIn: PendingCheckIn): void {
-    if (!checkIn.scanned) this.isSubmitting = false;
-    if (checkIn.scanned) {
-      const scanKey = this.scanKey(checkIn.eventId, checkIn.mssv);
-      this.activeScanKeys.delete(scanKey);
-      this.scanCooldowns.set(scanKey, Date.now());
-    }
-    this.changeDetector.detectChanges();
   }
 
   private acceptScannedCode(scanKey: string): boolean {
@@ -323,31 +390,6 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     return true;
   }
 
-  private addRecentCheckIn(checkIn: PendingCheckIn): void {
-    const recentCheckIn: RecentCheckIn = {
-      requestId: checkIn.requestId,
-      eventId: checkIn.eventId,
-      mssv: checkIn.mssv,
-      method: checkIn.method,
-      createdAt: new Date().toISOString(),
-      status: 'SENDING',
-    };
-    if (checkIn.eventId === this.selectedEventId) this.recentCheckIns = [recentCheckIn, ...this.recentCheckIns];
-    this.persistRecentCheckIn(recentCheckIn);
-  }
-
-  private updateRecentCheckIn(requestId: string, changes: Partial<RecentCheckIn>): void {
-    let updatedItem: RecentCheckIn | undefined;
-    this.recentCheckIns = this.recentCheckIns.map(item => {
-      if (item.requestId !== requestId) return item;
-      updatedItem = { ...item, ...changes };
-      return updatedItem;
-    });
-    if (updatedItem) this.persistRecentCheckIn(updatedItem);
-    else this.persistRecentCheckInUpdate(requestId, changes);
-    this.changeDetector.detectChanges();
-  }
-
   private async loadRecentCheckIns(): Promise<void> {
     const eventId = this.selectedEventId;
     if (!eventId) {
@@ -356,96 +398,29 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     }
     const savedHistory = await this.offlineQueue.historyForEvent(eventId);
     if (eventId !== this.selectedEventId) return;
-    const historyByRequestId = new Map(savedHistory.map(item => [item.requestId, item]));
-    for (const item of this.recentCheckIns) {
-      if (item.eventId === eventId) historyByRequestId.set(item.requestId, item);
-    }
-    this.recentCheckIns = [...historyByRequestId.values()]
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+    this.recentCheckIns = savedHistory;
     this.changeDetector.detectChanges();
   }
 
-  private persistRecentCheckIn(item: RecentCheckIn): void {
-    this.historySaveChain = this.historySaveChain
-      .catch(() => undefined)
-      .then(() => this.offlineQueue.saveHistory(item));
-  }
-
-  private persistRecentCheckInUpdate(requestId: string, changes: Partial<RecentCheckIn>): void {
-    this.historySaveChain = this.historySaveChain
-      .catch(() => undefined)
-      .then(() => this.offlineQueue.updateHistory(requestId, changes));
-  }
-
-  async clearRecentCheckIns(): Promise<void> {
+  private async refreshRosterAvailability(): Promise<void> {
     const eventId = this.selectedEventId;
-    if (!eventId || !this.recentCheckIns.length || !window.confirm('Xoá toàn bộ lịch sử quét của sự kiện đang chọn?')) return;
-    await this.offlineQueue.clearHistoryForEvent(eventId);
-    this.recentCheckIns = [];
+    this.rosterReady = !!eventId && await this.offlineQueue.hasRoster(eventId);
     this.changeDetector.detectChanges();
-    this.showToast('Đã xoá lịch sử quét của sự kiện đang chọn.', false);
-  }
-
-  private updatePendingRequestCount(): void {
-    this.pendingRequestCount = this.activeRequestCount + this.pendingCheckIns.length;
-    this.changeDetector.detectChanges();
-  }
-
-  private async syncPendingCheckIns(): Promise<void> {
-    if (this.isSyncing || this.networkStatus !== 'ONLINE') return;
-    this.isSyncing = true;
-    try {
-      for (const item of await this.offlineQueue.pending()) {
-        if (this.networkStatus !== 'ONLINE') break;
-        await this.submitQueuedCheckIn(item, false);
-      }
-    } finally {
-      this.isSyncing = false;
-      await this.refreshQueueSummary();
-    }
-  }
-
-  private async submitQueuedCheckIn(item: QueuedCheckIn, showResult: boolean): Promise<void> {
-    try {
-      const result = await firstValueFrom(this.api.checkIn(item.eventId, item.mssv, item.method, item.requestId));
-      await this.offlineQueue.remove(item.requestId);
-      this.isError = false;
-      this.updateRecentCheckIn(item.requestId, {
-        status: result.status === 'CHECKED_IN' ? 'CHECKED_IN' : 'ALREADY_CHECKED_IN',
-        fullName: result.fullName,
-        message: result.status === 'CHECKED_IN' ? 'Điểm danh thành công.' : 'Sinh viên đã điểm danh trước đó.',
-      });
-      if (showResult) {
-        this.stopScanner();
-        this.resultDialog = result;
-      }
-    } catch (error) {
-      if (this.shouldRetry(error)) {
-        this.setNetworkStatus('OFFLINE');
-        if (showResult) this.showToast('Kết nối yếu: lượt điểm danh đã được lưu và sẽ tự đồng bộ.', false);
-        return;
-      }
-      // A response from the server is final for this attempt. Invalid QR/MSSV
-      // and other business errors must not leave an item stuck in the queue.
-      await this.offlineQueue.remove(item.requestId);
-      this.updateRecentCheckIn(item.requestId, {
-        status: 'ERROR',
-        message: this.errorMessage(error as HttpErrorResponse),
-      });
-      if (showResult) this.showError(error as HttpErrorResponse);
-    } finally {
-      await this.refreshQueueSummary();
-    }
   }
 
   private async loadCachedEvents(error: HttpErrorResponse): Promise<void> {
     const cached = await this.offlineQueue.cachedEvents();
     if (cached?.events.length) {
       this.events = cached.events;
-      this.selectedEventId = cached.events.find(event => event.status === 'OPEN')?.eventId ?? '';
+      if (!cached.events.some(event => event.eventId === this.selectedEventId)) {
+        this.selectedEventId = '';
+        this.rosterReady = false;
+      }
       this.isLoading = false;
       this.usingCachedEvents = true;
       void this.loadRecentCheckIns();
+      if (this.selectedEventId) void this.refreshRosterAvailability();
+      else this.isEventPickerOpen = true;
       if (this.selectedEventId) {
         this.showToast('Đang dùng danh sách sự kiện đã lưu trên thiết bị.', false);
         return;
@@ -457,24 +432,17 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   private async refreshQueueSummary(): Promise<void> {
     const summary = await this.offlineQueue.summary();
     this.pendingCount = summary.pending;
-    this.failedCount = summary.failed;
+    this.pendingRequestCount = summary.pending;
     this.changeDetector.detectChanges();
   }
 
   private async refreshQueueItems(): Promise<void> { this.queueItems = await this.offlineQueue.all(); }
-
-  private async prepareQueue(): Promise<void> {
-    const removed = await this.offlineQueue.deduplicate();
-    await this.refreshQueueSummary();
-    if (removed) this.showToast(`Đã gộp ${removed} lượt quét trùng đang chờ đồng bộ.`, false);
-  }
 
   private shouldRetry(error: unknown): boolean {
     if (!(error instanceof HttpErrorResponse)) return true;
     return error.status === 0 || error.status === 408 || error.status === 429 || error.status >= 500;
   }
 
-  get isOffline(): boolean { return this.networkStatus !== 'ONLINE'; }
   get networkStatusLabel(): string {
     if (this.networkStatus === 'ONLINE') return 'Hệ thống sẵn sàng đồng bộ';
     if (this.networkStatus === 'CHECKING') return 'Đang kiểm tra kết nối hệ thống';
@@ -492,7 +460,12 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     try {
       await firstValueFrom(this.api.health());
       this.setNetworkStatus('ONLINE');
-      if (syncAfterSuccess) await this.syncPendingCheckIns();
+      if (syncAfterSuccess) {
+        await this.syncSelectedEvent();
+        for (const eventId of await this.offlineQueue.queuedEvents()) {
+          if (eventId !== this.selectedEventId) await this.pushQueuedScans(eventId);
+        }
+      }
     } catch {
       this.setNetworkStatus('OFFLINE');
     } finally {
@@ -509,8 +482,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     try { await navigator.storage?.persist(); } catch { /* Browser storage is still usable without persistence. */ }
   }
 
-  continueScanning(): void { this.resultDialog = undefined; void this.startScanner(); }
-  formatCheckedInAt(value: string): string { return new Date(value).toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'medium' }); }
+  formatCheckedInAt(value: number): string { return new Date(value).toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'medium' }); }
   private async bindCamera(): Promise<void> {
     try {
       const video = this.scannerVideo?.nativeElement; if (!video || !this.isScanning) return;
@@ -606,7 +578,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     if (!result || !this.isScanning) return;
     const mssv = result.getText().trim();
     if (!mssv) return;
-    this.method = result.getBarcodeFormat() === BarcodeFormat.QR_CODE ? 'QR' : 'BARCODE';
+    this.method = 'AUTO_SCAN';
     this.zone.run(() => this.checkIn(mssv, true));
   }
   private scanKey(eventId: string, mssv: string): string { return eventId + '\u0000' + mssv; }
@@ -616,15 +588,18 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   }
   private errorMessage(error: HttpErrorResponse): string {
     const messages: Record<string, string> = {
-      EVENT_NOT_FOUND: 'Không tìm thấy sự kiện điểm danh.',
-      INVALID_MSSV: 'Mã quét không hợp lệ. Vui lòng quét đúng mã sinh viên.',
-      STUDENT_NOT_FOUND: 'Không tìm thấy sinh viên với MSSV này.',
-      STUDENT_NOT_REGISTERED: 'Sinh viên chưa được đăng ký trong sự kiện này.',
-      EVENT_NOT_OPEN: 'Sự kiện hiện không mở điểm danh.',
+      missing_token: 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.',
+      invalid_token: 'Phiên đăng nhập đã hết hạn. Vui lòng đăng nhập lại.',
+      no_group: 'Tài khoản đang chờ được cấp quyền.',
+      disabled: 'Tài khoản đã bị khoá.',
+      forbidden: 'Bạn không có quyền thực hiện thao tác này.',
+      event_not_found: 'Không tìm thấy sự kiện.',
+      bad_scan: 'Dữ liệu lượt quét không hợp lệ.',
+      batch_too_large: 'Lô quét quá lớn, hệ thống sẽ tự chia lô nhỏ hơn.',
     };
-    return messages[error.error?.code] || 'Không thể kết nối đến hệ thống điểm danh. Vui lòng thử lại.';
+    return messages[error.error?.error] || error.error?.message || 'Không thể kết nối đến hệ thống điểm danh. Vui lòng thử lại.';
   }
-  private showErrorMessage(message: string): void { this.isError = true; this.showToast(message, true); }
+  private showErrorMessage(message: string): void { this.showToast(message, true); }
   private showToast(message: string, isError: boolean): void {
     this.toastMessage = message;
     this.toastIsError = isError;
