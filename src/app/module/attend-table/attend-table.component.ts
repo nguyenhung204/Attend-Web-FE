@@ -28,7 +28,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   activeTab: 'scan' | 'manual' | 'history' = 'scan';
   isEventPickerOpen = true;
   isLoading = true; isScanning = false; isSubmitting = false; torchAvailable = false; torchOn = false; toastMessage = ''; toastIsError = false;
-  pendingCount = 0; pendingRequestCount = 0; isSyncing = false; usingCachedEvents = false;
+  pendingCount = 0; failedCount = 0; pendingRequestCount = 0; isSyncing = false; usingCachedEvents = false;
   rosterReady = false;
   queueItems: QueuedScan[] = [];
   recentCheckIns: RecentCheckIn[] = [];
@@ -50,6 +50,8 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   constructor(private readonly api: HttpService, private readonly offlineQueue: OfflineCheckInQueueService, private readonly zone: NgZone, private readonly changeDetector: ChangeDetectorRef) { }
   ngOnInit(): void {
     void this.requestPersistentStorage();
+    void this.refreshQueueSummary();
+    void this.refreshQueueItems();
     window.addEventListener('online', this.onlineHandler); window.addEventListener('offline', this.offlineHandler);
     this.syncTimer = setInterval(() => void this.refreshConnectivity(true), 15000);
     void this.loadIdentity();
@@ -78,6 +80,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   selectEvent(event: EventSummary): void {
     if (!event.isLive) return;
     this.selectedEventId = event.eventId;
+    void this.offlineQueue.saveSelectedEventId(event.eventId);
     this.recentCheckIns = [];
     this.rosterReady = false;
     this.mssv = '';
@@ -174,6 +177,10 @@ export class AttendTableComponent implements OnInit, OnDestroy {
 
   private async loadIdentity(): Promise<void> {
     try {
+      await this.offlineQueue.migrateLegacyHistory();
+      this.selectedEventId = await this.offlineQueue.selectedEventId();
+    } catch { /* Continue without a restored selection. */ }
+    try {
       this.identity = await firstValueFrom(this.api.me());
       if (!this.identity.role) {
         this.authState = 'pending';
@@ -235,6 +242,8 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   }
 
   async retryPendingCheckIns(): Promise<void> {
+    await this.offlineQueue.retryFailed();
+    await this.refreshQueueSummary();
     await this.refreshConnectivity(true);
   }
 
@@ -247,6 +256,10 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       }
       const ticket = await this.offlineQueue.getTicket(event.eventId, ticketCode);
       const pending = await this.offlineQueue.pendingTicket(event.eventId, ticketCode);
+      if (pending) {
+        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), false);
+        return;
+      }
       const outcome = this.outcomeFor(ticket, pending);
       const scan: ScanRequest = {
         clientEventId: crypto.randomUUID(),
@@ -260,7 +273,11 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         deviceId: await this.offlineQueue.deviceIdentity(),
         entryMode,
       };
-      await this.offlineQueue.enqueue(scan, ticket?.holderName);
+      const enqueued = await this.offlineQueue.enqueue(scan, ticket?.holderName);
+      if (!enqueued) {
+        this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), false);
+        return;
+      }
       await this.loadRecentCheckIns();
       this.showToast(this.attendanceToastMessage(outcome, ticket?.holderName || ticketCode), false);
       if (this.networkStatus === 'ONLINE') await this.pushQueuedScans(event.eventId);
@@ -299,7 +316,9 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     const event = this.selectedEvent;
     if (!event || this.networkStatus !== 'ONLINE') return;
     try {
-      await Promise.all([this.syncRoster(event), this.syncScanFeed(event), this.pushQueuedScans(event.eventId)]);
+      await this.syncRoster(event);
+      await this.pushQueuedScans(event.eventId);
+      await this.syncScanFeed(event);
       await this.loadRecentCheckIns();
     } catch (error) {
       if (this.shouldRetry(error)) this.setNetworkStatus('OFFLINE');
@@ -363,12 +382,17 @@ export class AttendTableComponent implements OnInit, OnDestroy {
           }
         } catch (error) {
           const message = this.errorMessage(error as HttpErrorResponse);
-          if (this.shouldRetry(error)) {
-            await this.offlineQueue.markAttempt(queued.map(item => item.clientEventId), message);
-            break;
+          const ids = queued.map(item => item.clientEventId);
+          await this.offlineQueue.markAttempt(ids, message);
+          if (!this.shouldRetry(error) && !(error instanceof HttpErrorResponse && error.status === 401)) {
+            await this.offlineQueue.markFailed(ids, message);
+            for (const item of queued) await this.offlineQueue.updateHistory(item.clientEventId, { status: 'ERROR', message });
           }
-          await this.offlineQueue.acknowledge(queued.map(item => item.clientEventId));
-          for (const item of queued) await this.offlineQueue.updateHistory(item.clientEventId, { status: 'REJECTED', message });
+          if (error instanceof HttpErrorResponse && error.status === 401) {
+            this.authState = 'login';
+            this.showErrorMessage('Phiên đăng nhập đã hết hạn. Dữ liệu vẫn được giữ trên thiết bị.');
+          }
+          break;
         }
       }
     } finally {
@@ -392,11 +416,9 @@ export class AttendTableComponent implements OnInit, OnDestroy {
 
   private async loadRecentCheckIns(): Promise<void> {
     const eventId = this.selectedEventId;
-    if (!eventId) {
-      this.recentCheckIns = [];
-      return;
-    }
-    const savedHistory = await this.offlineQueue.historyForEvent(eventId);
+    const savedHistory = eventId
+      ? await this.offlineQueue.historyForEvent(eventId)
+      : await this.offlineQueue.allHistory();
     if (eventId !== this.selectedEventId) return;
     this.recentCheckIns = savedHistory;
     this.changeDetector.detectChanges();
@@ -432,6 +454,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   private async refreshQueueSummary(): Promise<void> {
     const summary = await this.offlineQueue.summary();
     this.pendingCount = summary.pending;
+    this.failedCount = summary.failed;
     this.pendingRequestCount = summary.pending;
     this.changeDetector.detectChanges();
   }

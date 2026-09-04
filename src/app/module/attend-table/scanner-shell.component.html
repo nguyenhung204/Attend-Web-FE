@@ -13,7 +13,7 @@
     <button class="connection-state" type="button" (click)="selectTab('history')" [class.online]="networkStatus === 'ONLINE'"
       [class.checking]="networkStatus === 'CHECKING'" [attr.aria-label]="networkStatusLabel" [title]="networkStatusLabel">
       <span></span>
-      <em *ngIf="pendingCount">{{ pendingCount }}</em>
+      <em *ngIf="pendingCount + failedCount">{{ pendingCount + failedCount }}</em>
     </button>
   </header>
 
@@ -105,14 +105,14 @@
     <div class="history-stats">
       <div><strong>{{ checkedInCount }}</strong><span>Đã điểm danh</span></div>
       <div><strong>{{ issueCount }}</strong><span>Không thể điểm danh</span></div>
-      <div><strong>{{ pendingCount }}</strong><span>Chờ đồng bộ</span></div>
+      <div><strong>{{ pendingCount + failedCount }}</strong><span>Chờ đồng bộ</span></div>
     </div>
 
     <div class="history-heading">
       <div><p>LỊCH SỬ CA TRỰC</p><h1>Lượt quét gần đây</h1></div>
       <div class="history-actions">
-      <button *ngIf="pendingCount" type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing">
-        {{ isSyncing ? 'Đang sync…' : 'Sync' }}
+      <button type="button" (click)="retryPendingCheckIns()" [disabled]="isSyncing || !(pendingCount + failedCount)">
+        {{ isSyncing ? 'Đang đồng bộ…' : 'Đồng bộ' }}
       </button>
       </div>
     </div>
@@ -136,7 +136,7 @@
       <article *ngFor="let item of queueItems">
         <span>↥</span>
         <div><strong>{{ item.ticketCode }}</strong><small>{{ formatCheckedInAt(item.createdAt) }}</small></div>
-        <em>{{ item.attempts ? 'Đang chờ mạng' : 'Đang chờ' }}</em>
+        <em>{{ item.syncState === 'FAILED' ? (item.lastError || 'Cần kiểm tra') : (item.attempts ? 'Đang chờ mạng' : 'Đang chờ') }}</em>
       </article>
     </div>
   </section>

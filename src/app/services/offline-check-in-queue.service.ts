@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { DBSchema, openDB } from 'idb';
+import { DBSchema, IDBPDatabase, openDB } from 'idb';
 import { EventSummary, ScanRequest, Ticket } from './http.service';
 
 export type LocalScanStatus = 'QUEUED' | 'SYNCED' | 'REJECTED' | 'CONFLICT' | 'ERROR';
@@ -12,6 +12,7 @@ export interface QueuedScan {
   createdAt: number;
   attempts: number;
   lastError?: string;
+  syncState?: 'PENDING' | 'FAILED';
 }
 
 export interface ScanHistoryItem {
@@ -46,6 +47,23 @@ interface DeviceState {
   id: 'device';
   deviceId: string;
   sequence: number;
+  selectedEventId?: string;
+  legacyHistoryMigrated?: boolean;
+}
+
+interface LegacyHistoryItem {
+  requestId: string;
+  eventId: string;
+  mssv: string;
+  method: 'QR' | 'BARCODE' | 'MANUAL';
+  createdAt: string;
+  status: 'SENDING' | 'QUEUED' | 'CHECKED_IN' | 'ALREADY_CHECKED_IN' | 'ERROR';
+  fullName?: string;
+  message?: string;
+}
+
+interface LegacyOfflineDb extends DBSchema {
+  'check-in-history': { key: string; value: LegacyHistoryItem };
 }
 
 interface TempleKeeperOfflineDb extends DBSchema {
@@ -122,16 +140,23 @@ export class OfflineCheckInQueueService {
     return !!(await (await this.database).getFromIndex('scan-queue', 'by-event-ticket', [eventId, ticketCode]));
   }
 
-  async enqueue(scan: ScanRequest, holderName?: string): Promise<void> {
+  async enqueue(scan: ScanRequest, holderName?: string): Promise<boolean> {
     const database = await this.database;
     const transaction = database.transaction(['scan-queue', 'scan-history'], 'readwrite');
-    await transaction.objectStore('scan-queue').add({
+    const queue = transaction.objectStore('scan-queue');
+    const existing = await queue.index('by-event-ticket').get([scan.eventId, scan.ticketCode]);
+    if (existing) {
+      await transaction.done;
+      return false;
+    }
+    await queue.add({
       clientEventId: scan.clientEventId,
       eventId: scan.eventId,
       ticketCode: scan.ticketCode,
       payload: scan,
       createdAt: Date.now(),
       attempts: 0,
+      syncState: 'PENDING',
     });
     await transaction.objectStore('scan-history').put({
       clientEventId: scan.clientEventId,
@@ -144,25 +169,31 @@ export class OfflineCheckInQueueService {
       holderName,
     });
     await transaction.done;
+    return true;
   }
 
   async pendingForEvent(eventId: string, limit = 500): Promise<QueuedScan[]> {
     return (await (await this.database).getAllFromIndex('scan-queue', 'by-event', eventId))
+      .filter(item => item.syncState !== 'FAILED')
       .sort((left, right) => left.createdAt - right.createdAt)
       .slice(0, limit);
   }
 
   async queuedEvents(): Promise<string[]> {
     const scans = await (await this.database).getAll('scan-queue');
-    return [...new Set(scans.map(scan => scan.eventId))];
+    return [...new Set(scans.filter(scan => scan.syncState !== 'FAILED').map(scan => scan.eventId))];
   }
 
   async all(): Promise<QueuedScan[]> {
     return (await (await this.database).getAll('scan-queue')).sort((left, right) => left.createdAt - right.createdAt);
   }
 
-  async summary(): Promise<{ pending: number }> {
-    return { pending: (await (await this.database).count('scan-queue')) };
+  async summary(): Promise<{ pending: number; failed: number }> {
+    const scans = await (await this.database).getAll('scan-queue');
+    return scans.reduce((summary, scan) => {
+      summary[scan.syncState === 'FAILED' ? 'failed' : 'pending'] += 1;
+      return summary;
+    }, { pending: 0, failed: 0 });
   }
 
   async acknowledge(clientEventIds: string[]): Promise<void> {
@@ -182,10 +213,91 @@ export class OfflineCheckInQueueService {
     await transaction.done;
   }
 
+  async retryFailed(): Promise<void> {
+    const database = await this.database;
+    const transaction = database.transaction('scan-queue', 'readwrite');
+    const scans = await transaction.store.getAll();
+    for (const scan of scans) {
+      if (scan.syncState === 'FAILED') await transaction.store.put({ ...scan, syncState: 'PENDING' });
+    }
+    await transaction.done;
+  }
+
+  async markFailed(clientEventIds: string[], message: string): Promise<void> {
+    const database = await this.database;
+    const transaction = database.transaction('scan-queue', 'readwrite');
+    for (const clientEventId of clientEventIds) {
+      const queued = await transaction.store.get(clientEventId);
+      if (queued) await transaction.store.put({ ...queued, syncState: 'FAILED', lastError: message });
+    }
+    await transaction.done;
+  }
+
+  async migrateLegacyHistory(): Promise<number> {
+    const database = await this.database;
+    const device = await database.get('device', 'device');
+    if (device?.legacyHistoryMigrated) return 0;
+    let migrated = 0;
+    let legacy: IDBPDatabase<LegacyOfflineDb> | undefined;
+    try {
+      legacy = await openDB<LegacyOfflineDb>('attendance-offline');
+      if (legacy.objectStoreNames.contains('check-in-history')) {
+        const oldItems = await legacy.getAll('check-in-history');
+        const transaction = database.transaction('scan-history', 'readwrite');
+        for (const oldItem of oldItems) {
+          if (await transaction.store.get(oldItem.requestId)) continue;
+          const completed = oldItem.status === 'CHECKED_IN';
+          const duplicate = oldItem.status === 'ALREADY_CHECKED_IN';
+          await transaction.store.put({
+            clientEventId: oldItem.requestId,
+            eventId: oldItem.eventId,
+            ticketCode: oldItem.mssv,
+            outcome: completed ? 'ADMITTED' : duplicate ? 'REJECTED_ALREADY_USED' : 'REJECTED_NOT_FOUND',
+            entryMode: oldItem.method,
+            createdAt: Date.parse(oldItem.createdAt) || Date.now(),
+            status: completed ? 'SYNCED' : duplicate ? 'CONFLICT' : 'ERROR',
+            holderName: oldItem.fullName,
+            message: oldItem.message || (completed ? 'Điểm danh thành công.' : duplicate ? 'Đã điểm danh trước đó.' : 'Dữ liệu từ phiên bản cũ cần được đối chiếu.'),
+          });
+          migrated += 1;
+        }
+        await transaction.done;
+      }
+    } catch {
+      return 0;
+    } finally {
+      legacy?.close();
+    }
+    const transaction = database.transaction('device', 'readwrite');
+    const stored = await transaction.store.get('device');
+    const state = stored ?? { id: 'device' as const, deviceId: crypto.randomUUID(), sequence: 0 };
+    await transaction.store.put({ ...state, legacyHistoryMigrated: true });
+    await transaction.done;
+    return migrated;
+  }
+
+  async selectedEventId(): Promise<string> {
+    return (await (await this.database).get('device', 'device'))?.selectedEventId ?? '';
+  }
+
+  async saveSelectedEventId(selectedEventId: string): Promise<void> {
+    const database = await this.database;
+    const transaction = database.transaction('device', 'readwrite');
+    const stored = await transaction.store.get('device');
+    const state = stored ?? { id: 'device' as const, deviceId: crypto.randomUUID(), sequence: 0 };
+    await transaction.store.put({ ...state, selectedEventId });
+    await transaction.done;
+  }
+
   async updateHistory(clientEventId: string, changes: Partial<ScanHistoryItem>): Promise<void> {
     const database = await this.database;
     const item = await database.get('scan-history', clientEventId);
     if (item) await database.put('scan-history', { ...item, ...changes });
+  }
+
+  async allHistory(): Promise<ScanHistoryItem[]> {
+    return (await (await this.database).getAll('scan-history'))
+      .sort((left, right) => right.createdAt - left.createdAt);
   }
 
   async historyForEvent(eventId: string): Promise<ScanHistoryItem[]> {
