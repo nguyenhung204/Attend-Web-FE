@@ -140,11 +140,13 @@ export class OfflineCheckInQueueService {
     return !!(await (await this.database).getFromIndex('scan-queue', 'by-event-ticket', [eventId, ticketCode]));
   }
 
-  async enqueue(scan: ScanRequest, holderName?: string): Promise<boolean> {
+  async enqueue(scan: ScanRequest, holderName?: string, allowSameTicket = false): Promise<boolean> {
     const database = await this.database;
     const transaction = database.transaction(['scan-queue', 'scan-history'], 'readwrite');
     const queue = transaction.objectStore('scan-queue');
-    const existing = await queue.index('by-event-ticket').get([scan.eventId, scan.ticketCode]);
+    const existing = allowSameTicket
+      ? undefined
+      : await queue.index('by-event-ticket').get([scan.eventId, scan.ticketCode]);
     if (existing) {
       await transaction.done;
       return false;

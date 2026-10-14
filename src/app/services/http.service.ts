@@ -67,6 +67,7 @@ export interface EventSummary {
   gateCountLabel?: string;
   ticketCodeLength: number;
   rosterVersion: number;
+  dedupeEnabled?: boolean;
   unitId?: string;
   unitName?: string;
   ownerAccountId?: string | null;
@@ -130,47 +131,81 @@ export interface ScanAcknowledgement {
 
 @Injectable({ providedIn: 'root' })
 export class HttpService {
-  /** The documented service prefix. Keeping it relative preserves browser cookies. */
+  /** Same-origin keeps the existing HttpOnly cookie flow working through the production/dev proxy. */
   private readonly apiUrl = '/bcn/templekeeper/';
-  private readonly requestOptions = { withCredentials: true };
+  private readonly accessTokenKey = 'templekeeper.pwa-access-token';
 
   constructor(private readonly http: HttpClient) { }
 
+  get accessToken(): string {
+    try { return localStorage.getItem(this.accessTokenKey)?.trim() ?? ''; }
+    catch { return ''; }
+  }
+
+  get hasAccessToken(): boolean { return !!this.accessToken; }
+
+  saveAccessToken(value: string): void {
+    const token = value.trim().replace(/^Bearer\s+/i, '').trim();
+    if (!token) {
+      this.clearAccessToken();
+      return;
+    }
+    try { localStorage.setItem(this.accessTokenKey, token); }
+    catch { throw new Error('Không thể lưu mã truy cập trên thiết bị.'); }
+  }
+
+  clearAccessToken(): void {
+    try { localStorage.removeItem(this.accessTokenKey); } catch { /* Storage may be unavailable. */ }
+  }
+
   health(): Observable<{ ok: true; service: 'templekeeper' }> {
-    return this.http.get<{ ok: true; service: 'templekeeper' }>(this.url('health'), this.requestOptions);
+    return this.http.get<{ ok: true; service: 'templekeeper' }>(this.url('health'), this.requestOptions());
   }
 
   me(): Observable<MeResponse> {
-    return this.http.get<MeResponse>(this.url('me'), this.requestOptions);
+    return this.http.get<MeResponse>(this.url('me'), this.requestOptions());
   }
 
   loginWithZalo(credentials: { oauthCode?: string; accessToken?: string; codeVerifier?: string }): Observable<{ accessToken: string; profile: Profile; role: Role | null }> {
-    return this.http.post<{ accessToken: string; profile: Profile; role: Role | null }>(this.url('auth/zalo'), credentials, this.requestOptions);
+    return this.http.post<{ accessToken: string; profile: Profile; role: Role | null }>(this.url('auth/zalo'), credentials, this.requestOptions());
   }
 
   webLoginUrl(): string { return new URL(this.url('auth/web/start'), window.location.origin).toString(); }
 
   logout(): Observable<void> {
-    return this.http.post<void>(this.url('auth/web/logout'), {}, this.requestOptions);
+    return this.http.post<void>(this.url('auth/web/logout'), {}, this.requestOptions());
   }
 
   getEvents(gateId?: string): Observable<EventSummary[]> {
     const params = gateId ? new HttpParams().set('gateId', gateId) : undefined;
-    return this.http.get<EventSummary[]>(this.url('events'), { ...this.requestOptions, params });
+    return this.http.get<EventSummary[]>(this.url('events'), this.requestOptions(params));
   }
 
   getRoster(eventId: string, cursor = '0', since = 0): Observable<RosterPage> {
     const params = new HttpParams().set('cursor', cursor).set('since', String(since));
-    return this.http.get<RosterPage>(this.url(`events/${this.segment(eventId)}/roster`), { ...this.requestOptions, params });
+    return this.http.get<RosterPage>(this.url(`events/${this.segment(eventId)}/roster`), this.requestOptions(params));
   }
 
   getScans(eventId: string, since = 0, limit = 500, order: 'asc' | 'desc' = 'asc'): Observable<ScanFeed> {
     const params = new HttpParams().set('since', String(since)).set('limit', String(limit)).set('order', order);
-    return this.http.get<ScanFeed>(this.url(`events/${this.segment(eventId)}/scans`), { ...this.requestOptions, params });
+    return this.http.get<ScanFeed>(this.url(`events/${this.segment(eventId)}/scans`), this.requestOptions(params));
   }
 
   postScans(scans: ScanRequest[]): Observable<{ acks: ScanAcknowledgement[] }> {
-    return this.http.post<{ acks: ScanAcknowledgement[] }>(this.url('scans'), { scans }, this.requestOptions);
+    return this.http.post<{ acks: ScanAcknowledgement[] }>(this.url('scans'), { scans }, this.requestOptions());
+  }
+
+  private requestOptions(params?: HttpParams): {
+    withCredentials: true;
+    headers: Record<string, string>;
+    params?: HttpParams;
+  } {
+    const token = this.accessToken;
+    return {
+      withCredentials: true,
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+      ...(params ? { params } : {}),
+    };
   }
 
   private url(path: string): string { return this.apiUrl + path.replace(/^\//, ''); }

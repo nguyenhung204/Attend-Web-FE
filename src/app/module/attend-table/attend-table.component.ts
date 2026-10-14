@@ -25,6 +25,10 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   events: EventSummary[] = []; selectedEventId = ''; mssv = ''; method: ScanEntryMode = 'MANUAL';
   identity?: MeResponse;
   authState: 'loading' | 'login' | 'pending' | 'ready' = 'loading';
+  accessCode = '';
+  accessCodeError = '';
+  showAccessCodeLogin = false;
+  isValidatingAccessCode = false;
   readonly keypadDigits = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0'];
   activeTab: 'scan' | 'manual' | 'history' = 'scan';
   isEventPickerOpen = true;
@@ -46,6 +50,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   private readonly priorityScanWindowMs = 850;
   private readonly fallbackQuietMs = 1200;
   private readonly scanCooldownMs = 2500;
+  private readonly identityCacheKey = 'templekeeper.pwa-identity';
   private readonly onlineHandler = () => { void this.refreshConnectivity(true); };
   private readonly offlineHandler = () => { this.setNetworkStatus('OFFLINE'); };
   constructor(private readonly api: HttpService, private readonly offlineQueue: OfflineCheckInQueueService, private readonly zone: NgZone, private readonly changeDetector: ChangeDetectorRef) { }
@@ -159,14 +164,15 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     if (this.authState !== 'ready') return;
     this.api.getEvents().subscribe({
       next: events => {
-        this.events = events;
-        if (!events.some(event => event.eventId === this.selectedEventId && event.isLive)) {
+        const normalizedEvents = events.map(event => ({ ...event, dedupeEnabled: event.dedupeEnabled !== false }));
+        this.events = normalizedEvents;
+        if (!normalizedEvents.some(event => event.eventId === this.selectedEventId && event.isLive)) {
           this.selectedEventId = '';
           this.rosterReady = false;
         }
         this.isLoading = false;
         this.usingCachedEvents = false;
-        void this.offlineQueue.cacheEvents(events);
+        void this.offlineQueue.cacheEvents(normalizedEvents);
         void this.loadRecentCheckIns();
         if (this.selectedEventId) {
           void this.refreshRosterAvailability();
@@ -174,30 +180,74 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         } else this.isEventPickerOpen = true;
       },
       error: error => {
-        if (error instanceof HttpErrorResponse && (error.status === 401 || error.status === 403)) {
-          this.authState = error.status === 401 ? 'login' : 'pending';
+        if (error instanceof HttpErrorResponse && error.status === 401) {
+          this.expireAuthentication();
+        } else if (error instanceof HttpErrorResponse && error.status === 403) {
+          this.authState = 'pending';
           this.isEventPickerOpen = false;
           this.isLoading = false;
-        }
-        else void this.loadCachedEvents(error);
+        } else void this.loadCachedEvents(error);
       },
     });
   }
 
-  startLogin(): void { window.location.assign(this.api.webLoginUrl()); }
+  startLogin(): void {
+    this.api.clearAccessToken();
+    window.location.assign(this.api.webLoginUrl());
+  }
+
+  openAccessCodeLogin(): void {
+    this.accessCodeError = '';
+    this.showAccessCodeLogin = true;
+  }
+
+  closeAccessCodeLogin(): void {
+    if (this.isValidatingAccessCode) return;
+    this.accessCodeError = '';
+    this.showAccessCodeLogin = false;
+  }
+
+  async submitAccessCode(): Promise<void> {
+    const token = this.accessCode.trim().replace(/^Bearer\s+/i, '').trim();
+    if (!token) {
+      this.accessCodeError = 'Hãy dán đầy đủ mã dành cho ứng dụng ngoài.';
+      return;
+    }
+    this.isValidatingAccessCode = true;
+    this.accessCodeError = '';
+    try {
+      this.api.saveAccessToken(token);
+      const identity = await firstValueFrom(this.api.me());
+      this.accessCode = '';
+      this.showAccessCodeLogin = false;
+      this.acceptIdentity(identity);
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 401) {
+        this.api.clearAccessToken();
+        this.accessCodeError = 'Mã không hợp lệ, đã hết hạn hoặc bị dán thiếu.';
+      } else {
+        this.accessCodeError = this.errorMessage(error as HttpErrorResponse);
+      }
+    } finally {
+      this.isValidatingAccessCode = false;
+      this.changeDetector.detectChanges();
+    }
+  }
 
   async logout(): Promise<void> {
     this.stopScanner();
+    const usedAccessCode = this.api.hasAccessToken;
+    this.api.clearAccessToken();
+    this.clearCachedIdentity();
     try {
       await firstValueFrom(this.api.logout());
-      this.identity = undefined;
-      this.authState = 'login';
-      this.events = [];
-      this.selectedEventId = '';
-      this.isEventPickerOpen = false;
     } catch {
-      this.showErrorMessage('Không thể đăng xuất. Vui lòng thử lại.');
+      if (!usedAccessCode) {
+        this.showErrorMessage('Không thể đăng xuất. Vui lòng thử lại.');
+        return;
+      }
     }
+    this.resetAuthentication();
   }
 
   private async loadIdentity(): Promise<void> {
@@ -205,21 +255,54 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       await this.offlineQueue.migrateLegacyHistory();
       this.selectedEventId = await this.offlineQueue.selectedEventId();
     } catch { /* Continue without a restored selection. */ }
+
     try {
-      this.identity = await firstValueFrom(this.api.me());
-      if (!this.identity.role) {
-        this.authState = 'pending';
-        this.isLoading = false;
-        this.isEventPickerOpen = false;
-        return;
+      this.acceptIdentity(await firstValueFrom(this.api.me()));
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 401 && this.api.hasAccessToken) {
+        this.api.clearAccessToken();
+        try {
+          this.acceptIdentity(await firstValueFrom(this.api.me()));
+          return;
+        } catch (cookieError) {
+          this.handleIdentityFailure(cookieError);
+          return;
+        }
       }
+      this.handleIdentityFailure(error);
+    }
+  }
+
+  private acceptIdentity(identity: MeResponse): void {
+    this.identity = identity;
+    this.cacheIdentity(identity);
+    this.isLoading = false;
+    this.isEventPickerOpen = false;
+    if (!identity.role) {
+      this.authState = 'pending';
+      return;
+    }
+    this.authState = 'ready';
+    this.loadEvents();
+  }
+
+  private handleIdentityFailure(error: unknown): void {
+    this.isLoading = false;
+    this.isEventPickerOpen = false;
+    if (error instanceof HttpErrorResponse && error.status === 401) {
+      this.api.clearAccessToken();
+      this.clearCachedIdentity();
+      this.authState = 'login';
+      return;
+    }
+    const cached = this.cachedIdentity();
+    if (cached?.role) {
+      this.identity = cached;
       this.authState = 'ready';
       this.loadEvents();
-    } catch (error) {
-      this.isLoading = false;
-      this.authState = error instanceof HttpErrorResponse && error.status === 401 ? 'login' : 'pending';
-      this.isEventPickerOpen = false;
+      return;
     }
+    this.authState = 'login';
   }
   async startScanner(): Promise<void> {
     if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
@@ -280,12 +363,13 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         return;
       }
       const ticket = await this.offlineQueue.getTicket(event.eventId, ticketCode);
-      const pending = await this.offlineQueue.pendingTicket(event.eventId, ticketCode);
+      const dedupeEnabled = event.dedupeEnabled !== false;
+      const pending = dedupeEnabled && await this.offlineQueue.pendingTicket(event.eventId, ticketCode);
       if (pending) {
         this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), 'duplicate');
         return;
       }
-      const outcome = this.outcomeFor(ticket, pending);
+      const outcome = this.outcomeFor(event, ticket, pending);
       const scan: ScanRequest = {
         clientEventId: crypto.randomUUID(),
         eventId: event.eventId,
@@ -298,7 +382,7 @@ export class AttendTableComponent implements OnInit, OnDestroy {
         deviceId: await this.offlineQueue.deviceIdentity(),
         entryMode,
       };
-      const enqueued = await this.offlineQueue.enqueue(scan, ticket?.holderName);
+      const enqueued = await this.offlineQueue.enqueue(scan, ticket?.holderName, !dedupeEnabled);
       if (!enqueued) {
         this.showToast(this.attendanceToastMessage('REJECTED_ALREADY_USED', ticket?.holderName || ticketCode), 'duplicate');
         return;
@@ -345,10 +429,10 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     }
   }
 
-  private outcomeFor(ticket: Ticket | undefined, hasPendingScan: boolean): ScanOutcome {
+  private outcomeFor(event: EventSummary, ticket: Ticket | undefined, hasPendingScan: boolean): ScanOutcome {
     if (!ticket) return 'REJECTED_NOT_FOUND';
     if (ticket.status === 'CANCELLED') return 'REJECTED_CANCELLED';
-    if (ticket.status === 'USED' || hasPendingScan) return 'REJECTED_ALREADY_USED';
+    if ((ticket.status === 'USED' || hasPendingScan) && event.dedupeEnabled !== false) return 'REJECTED_ALREADY_USED';
     return 'ADMITTED';
   }
 
@@ -361,13 +445,18 @@ export class AttendTableComponent implements OnInit, OnDestroy {
       await this.syncScanFeed(event);
       await this.loadRecentCheckIns();
     } catch (error) {
-      if (this.shouldRetry(error)) this.setNetworkStatus('OFFLINE');
+      if (error instanceof HttpErrorResponse && error.status === 401) {
+        this.expireAuthentication();
+        this.showErrorMessage('Phiên đăng nhập đã hết hạn. Dữ liệu vẫn được giữ trên thiết bị.');
+      } else if (this.shouldRetry(error)) {
+        this.setNetworkStatus('OFFLINE');
+      }
     }
   }
 
   private async syncRoster(event: EventSummary): Promise<void> {
     const state = await this.offlineQueue.getSyncState(event.eventId);
-    if (state.rosterVersion === event.rosterVersion) return;
+    if (state.rosterVersion === event.rosterVersion && await this.offlineQueue.hasRoster(event.eventId)) return;
     let cursor = '0';
     let version = state.rosterVersion;
     let firstPage = true;
@@ -406,32 +495,77 @@ export class AttendTableComponent implements OnInit, OnDestroy {
   private async pushQueuedScans(eventId: string): Promise<void> {
     if (this.isSyncing || this.networkStatus !== 'ONLINE') return;
     this.isSyncing = true;
+    let batchSize = 500;
     try {
       while (true) {
-        const queued = await this.offlineQueue.pendingForEvent(eventId);
+        const queued = await this.offlineQueue.pendingForEvent(eventId, batchSize);
         if (!queued.length) break;
         try {
           const { acks } = await firstValueFrom(this.api.postScans(queued.map(item => item.payload)));
-          if (!acks.length) break;
-          await this.offlineQueue.acknowledge(acks.map(ack => ack.clientEventId));
-          for (const ack of acks) {
-            const queuedItem = queued.find(item => item.clientEventId === ack.clientEventId);
-            if (!queuedItem) continue;
+          const queuedById = new Map(queued.map(item => [item.clientEventId, item]));
+          const acknowledged = acks.filter(ack => queuedById.has(ack.clientEventId));
+          if (!acknowledged.length) {
+            await this.offlineQueue.markAttempt(
+              queued.map(item => item.clientEventId),
+              'Server chưa xác nhận lượt quét; dữ liệu sẽ được gửi lại.',
+            );
+            break;
+          }
+
+          await this.offlineQueue.acknowledge(acknowledged.map(ack => ack.clientEventId));
+          for (const ack of acknowledged) {
+            const queuedItem = queuedById.get(ack.clientEventId)!;
             await this.offlineQueue.updateHistory(
               ack.clientEventId,
-              this.resolvedHistoryStatus(queuedItem.payload.outcome, ack.accepted, ack.conflictReason, ack.duplicate),
+              this.resolvedHistoryStatus(queuedItem.payload.outcome, ack.accepted, ack.conflictReason),
             );
           }
-        } catch (error) {
-          const message = this.errorMessage(error as HttpErrorResponse);
-          const ids = queued.map(item => item.clientEventId);
-          await this.offlineQueue.markAttempt(ids, message);
-          if (!this.shouldRetry(error) && !(error instanceof HttpErrorResponse && error.status === 401)) {
-            await this.offlineQueue.markFailed(ids, message);
-            for (const item of queued) await this.offlineQueue.updateHistory(item.clientEventId, { status: 'ERROR', message });
+
+          if (acknowledged.length < queued.length) {
+            const acknowledgedIds = new Set(acknowledged.map(ack => ack.clientEventId));
+            const missingIds = queued
+              .filter(item => !acknowledgedIds.has(item.clientEventId))
+              .map(item => item.clientEventId);
+            await this.offlineQueue.markAttempt(missingIds, 'Server chưa xác nhận lượt quét; dữ liệu sẽ được gửi lại.');
+            break;
           }
-          if (error instanceof HttpErrorResponse && error.status === 401) {
-            this.authState = 'login';
+          batchSize = 500;
+        } catch (error) {
+          const httpError = error as HttpErrorResponse;
+          const message = this.errorMessage(httpError);
+          const ids = queued.map(item => item.clientEventId);
+
+          if (httpError.status === 413 && queued.length > 1) {
+            batchSize = Math.max(1, Math.floor(queued.length / 2));
+            continue;
+          }
+
+          const problemIndexes: number[] = httpError.status === 400 && Array.isArray(httpError.error?.problems)
+            ? httpError.error.problems
+                .map((problem: { index: number }) => problem.index)
+                .filter((index: number) => Number.isInteger(index) && index >= 0 && index < queued.length)
+            : [];
+          if (problemIndexes.length) {
+            const invalidItems: QueuedScan[] = problemIndexes.map((index: number) => queued[index]);
+            const invalidIds: string[] = invalidItems.map((item: QueuedScan) => item.clientEventId);
+            await this.offlineQueue.markAttempt(invalidIds, message);
+            await this.offlineQueue.markFailed(invalidIds, message);
+            for (const item of invalidItems) {
+              await this.offlineQueue.updateHistory(item.clientEventId, { status: 'ERROR', message });
+            }
+            if (invalidIds.length < queued.length) continue;
+            break;
+          }
+
+          await this.offlineQueue.markAttempt(ids, message);
+          if (!this.shouldRetry(httpError) && httpError.status !== 401) {
+            await this.offlineQueue.markFailed(ids, message);
+            for (const item of queued) {
+              await this.offlineQueue.updateHistory(item.clientEventId, { status: 'ERROR', message });
+            }
+          }
+          if (httpError.status === 401) {
+            this.expireAuthentication();
             this.showErrorMessage('Phiên đăng nhập đã hết hạn. Dữ liệu vẫn được giữ trên thiết bị.');
           }
           break;
@@ -448,21 +582,19 @@ export class AttendTableComponent implements OnInit, OnDestroy {
     outcome: ScanOutcome,
     accepted: boolean,
     conflictReason?: string | null,
-    duplicate = false,
   ): Pick<ScanHistoryItem, 'status' | 'message'> {
-    if (outcome === 'REJECTED_ALREADY_USED' || duplicate) {
+    if (!accepted) {
       const reason = conflictReason?.trim();
-      return { status: 'CONFLICT', message: reason ? 'Trùng: ' + reason : 'Trùng: đã điểm danh trước đó.' };
+      return { status: 'CONFLICT', message: reason ? 'Trùng: ' + reason : 'Trùng: cổng khác đã điểm danh trước.' };
+    }
+    if (outcome === 'REJECTED_ALREADY_USED') {
+      return { status: 'CONFLICT', message: 'Trùng: đã điểm danh trước đó.' };
     }
     if (outcome === 'REJECTED_NOT_FOUND') {
       return { status: 'REJECTED', message: 'Không thể điểm danh: mã không có trong danh sách.' };
     }
     if (outcome === 'REJECTED_CANCELLED') {
       return { status: 'REJECTED', message: 'Không thể điểm danh: vé đã bị hủy.' };
-    }
-    if (!accepted) {
-      const reason = conflictReason?.trim();
-      return { status: 'REJECTED', message: reason ? 'Không thể điểm danh: ' + reason : 'Không thể điểm danh: server từ chối lượt quét.' };
     }
     if (outcome === 'UNDONE') {
       return { status: 'SYNCED', message: 'Đã hoàn tác điểm danh.' };
@@ -557,8 +689,12 @@ export class AttendTableComponent implements OnInit, OnDestroy {
           if (eventId !== this.selectedEventId) await this.pushQueuedScans(eventId);
         }
       }
-    } catch {
-      this.setNetworkStatus('OFFLINE');
+    } catch (error) {
+      if (error instanceof HttpErrorResponse && error.status === 401) {
+        this.expireAuthentication();
+      } else {
+        this.setNetworkStatus('OFFLINE');
+      }
     } finally {
       this.isCheckingConnectivity = false;
     }
@@ -571,6 +707,40 @@ export class AttendTableComponent implements OnInit, OnDestroy {
 
   private async requestPersistentStorage(): Promise<void> {
     try { await navigator.storage?.persist(); } catch { /* Browser storage is still usable without persistence. */ }
+  }
+
+  private cacheIdentity(identity: MeResponse): void {
+    try { localStorage.setItem(this.identityCacheKey, JSON.stringify(identity)); } catch { /* Optional cache. */ }
+  }
+
+  private cachedIdentity(): MeResponse | undefined {
+    try {
+      const value = localStorage.getItem(this.identityCacheKey);
+      return value ? JSON.parse(value) as MeResponse : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private clearCachedIdentity(): void {
+    try { localStorage.removeItem(this.identityCacheKey); } catch { /* Optional cache. */ }
+  }
+
+  private expireAuthentication(): void {
+    this.api.clearAccessToken();
+    this.clearCachedIdentity();
+    this.resetAuthentication();
+  }
+
+  private resetAuthentication(): void {
+    this.identity = undefined;
+    this.authState = 'login';
+    this.events = [];
+    this.selectedEventId = '';
+    this.isLoading = false;
+    this.isEventPickerOpen = false;
+    this.showAccessCodeLogin = false;
+    this.accessCode = '';
   }
 
   formatCheckedInAt(value: number): string { return new Date(value).toLocaleString('vi-VN', { dateStyle: 'short', timeStyle: 'medium' }); }

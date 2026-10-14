@@ -194,12 +194,74 @@
 .scanner-toast.rejected>span { padding-bottom:1px; }
 .scanner-toast p { margin:0; font-size:13px; line-height:1.35; }
 
-.auth-gate { position:absolute; z-index:60; inset:0; display:grid; place-items:center; padding:24px; background:#0f1213; }
-.auth-card { width:100%; max-width:320px; text-align:center; }
+.auth-gate {
+  position:absolute;
+  z-index:60;
+  inset:0;
+  display:grid;
+  place-items:center;
+  overflow:auto;
+  padding:24px;
+  background:#0f1213;
+}
+.auth-card { width:100%; max-width:340px; text-align:center; }
 .auth-card p { margin:0; color:#2bbbd7; font-size:10px; font-weight:800; letter-spacing:1px; }
 .auth-card h1 { margin:10px 0; font-size:24px; line-height:1.25; }
 .auth-card span { display:block; color:rgba(255,255,255,.56); font-size:13px; line-height:1.55; }
-.auth-card button { width:100%; height:48px; margin-top:22px; border:0; border-radius:999px; background:#218dae; color:#fff; font:inherit; font-size:14px; font-weight:750; cursor:pointer; }
+.auth-card button {
+  width:100%;
+  height:48px;
+  margin-top:22px;
+  border:0;
+  border-radius:999px;
+  background:#218dae;
+  color:#fff;
+  font:inherit;
+  font-size:14px;
+  font-weight:750;
+  cursor:pointer;
+}
+.auth-card button:disabled { cursor:not-allowed; opacity:.55; }
+.auth-card .auth-secondary {
+  margin-top:10px;
+  border:1px solid rgba(255,255,255,.14);
+  background:#171c1d;
+  color:rgba(255,255,255,.82);
+}
+.auth-identity { display:block; margin:14px 0 6px; color:#fff; font-size:15px; }
+.access-code-form { padding:18px 0; text-align:left; }
+.access-code-form>p,
+.access-code-form>h1,
+.access-code-form>span { text-align:center; }
+.access-code-form label {
+  display:block;
+  margin:20px 0 7px;
+  color:rgba(255,255,255,.78);
+  font-size:12px;
+  font-weight:700;
+}
+.access-code-form textarea {
+  box-sizing:border-box;
+  width:100%;
+  min-height:112px;
+  resize:vertical;
+  padding:12px;
+  border:1px solid rgba(255,255,255,.16);
+  border-radius:10px;
+  outline:none;
+  background:#171c1d;
+  color:#fff;
+  font:500 12px/1.45 ui-monospace,SFMono-Regular,Consolas,monospace;
+  overflow-wrap:anywhere;
+}
+.access-code-form textarea:focus {
+  border-color:#2bbbd7;
+  box-shadow:0 0 0 3px rgba(43,187,215,.13);
+}
+.access-code-form small { display:block; margin-top:8px; font-size:11px; line-height:1.45; }
+.access-code-warning { color:#ffd758; }
+.access-code-error { color:#ff8d86; }
+.access-code-form button { margin-top:16px; }
 
 .scanner-screen { flex:1; min-height:0; }
 .scan-screen { display:flex; flex-direction:column; }

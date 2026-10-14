@@ -1,7 +1,7 @@
 <main class="scanner-app">
   <header class="scanner-header">
     <button class="event-summary" type="button" (click)="openEventPicker()" [disabled]="isLoading">
-      <span class="event-kicker">{{ selectedEvent ? 'SỰ KIỆN ĐANG CHỌN' : 'MÁY SOÁT VÉ' }}</span>
+      <span class="event-kicker">{{ identity?.profile?.name ? identity?.profile?.name + ' · ' : '' }}{{ selectedEvent ? 'SỰ KIỆN ĐANG CHỌN' : 'MÁY SOÁT VÉ' }}</span>
       <span class="event-title">{{ selectedEvent?.name || (isLoading ? 'Đang tải sự kiện…' : 'Chọn sự kiện để bắt đầu') }}</span>
     </button>
     <div *ngIf="authState === 'ready'" class="header-actions">
@@ -25,9 +25,42 @@
   </div>
 
   <section *ngIf="authState !== 'ready'" class="auth-gate" role="dialog" aria-live="polite">
-    <div class="auth-card" *ngIf="authState === 'loading'"><p>ĐANG KIỂM TRA PHIÊN</p><h1>Đang chuẩn bị máy soát vé…</h1></div>
-    <div class="auth-card" *ngIf="authState === 'login'"><p>ĐĂNG NHẬP BẮT BUỘC</p><h1>Đăng nhập bằng Zalo</h1><span>Phiên đăng nhập giúp hệ thống xác nhận quyền soát vé trước khi tải sự kiện.</span><button type="button" (click)="startLogin()">Đăng nhập Zalo</button></div>
-    <div class="auth-card" *ngIf="authState === 'pending'"><p>ĐANG CHỜ CẤP QUYỀN</p><h1>Tài khoản chưa được phép soát vé.</h1><span>Quản trị viên cần gán tài khoản vào đơn vị trước khi bạn tiếp tục.</span></div>
+    <div class="auth-card" *ngIf="authState === 'loading'">
+      <p>ĐANG KIỂM TRA PHIÊN</p>
+      <h1>Đang chuẩn bị máy soát vé…</h1>
+    </div>
+
+    <div class="auth-card" *ngIf="authState === 'login' && !showAccessCodeLogin">
+      <p>ĐĂNG NHẬP BẮT BUỘC</p>
+      <h1>Chọn cách đăng nhập</h1>
+      <span>Trên trình duyệt, bạn có thể đăng nhập trực tiếp bằng Zalo.</span>
+      <button type="button" (click)="startLogin()">Đăng nhập Zalo</button>
+      <button class="auth-secondary" type="button" (click)="openAccessCodeLogin()">Dùng mã cho ứng dụng ngoài</button>
+    </div>
+
+    <form class="auth-card access-code-form" *ngIf="authState === 'login' && showAccessCodeLogin" (ngSubmit)="submitAccessCode()">
+      <p>ĐĂNG NHẬP PWA</p>
+      <h1>Dán mã truy cập</h1>
+      <span>Lấy mã tại dashboard Temple Keeper trong mục “Mã cho ứng dụng ngoài”, sau đó quay lại đây và dán vào.</span>
+      <label for="access-code">Mã truy cập</label>
+      <textarea id="access-code" name="accessCode" [(ngModel)]="accessCode" rows="5"
+        autocomplete="off" autocapitalize="off" spellcheck="false"
+        placeholder="Dán toàn bộ mã tại đây"></textarea>
+      <small class="access-code-warning">Mã này là mật khẩu. Không chia sẻ, chụp màn hình hoặc gửi cho người khác.</small>
+      <small *ngIf="accessCodeError" class="access-code-error" role="alert">{{ accessCodeError }}</small>
+      <button type="submit" [disabled]="isValidatingAccessCode || !accessCode.trim()">
+        {{ isValidatingAccessCode ? 'Đang kiểm tra…' : 'Kiểm tra và đăng nhập' }}
+      </button>
+      <button class="auth-secondary" type="button" (click)="closeAccessCodeLogin()" [disabled]="isValidatingAccessCode">Quay lại</button>
+    </form>
+
+    <div class="auth-card" *ngIf="authState === 'pending'">
+      <p>ĐANG CHỜ CẤP QUYỀN</p>
+      <h1>Tài khoản chưa được phép soát vé.</h1>
+      <strong *ngIf="identity?.profile?.name" class="auth-identity">{{ identity?.profile?.name }}</strong>
+      <span>Quản trị viên cần gán tài khoản vào đơn vị trước khi bạn tiếp tục.</span>
+      <button class="auth-secondary" type="button" (click)="logout()">Đổi tài khoản</button>
+    </div>
   </section>
 
   <section *ngIf="activeTab === 'scan'" class="scanner-screen scan-screen">
